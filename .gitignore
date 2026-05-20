@@ -10,3 +10,4 @@
 *.log
 coverage.out
 coverage.html
+.sisyphus/
