@@ -32,7 +32,7 @@ type Config struct {
 	EnableMetrics bool       `json:"enable_metrics"`
 	StartedAt     time.Time  `json:"-"`
 
-	mu sync.RWMutex
+	mu *sync.RWMutex
 }
 
 var (
@@ -62,9 +62,12 @@ func Reload() {
 
 // Snapshot returns a deep-ish copy safe for read-only use.
 func (c *Config) Snapshot() Config {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	if c.mu != nil {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+	}
 	out := *c
+	out.mu = nil
 	out.Providers = append([]Provider(nil), c.Providers...)
 	out.AccessTokens = append([]string(nil), c.AccessTokens...)
 	return out
@@ -72,8 +75,10 @@ func (c *Config) Snapshot() Config {
 
 // FindProvider locates a provider by name (case-insensitive).
 func (c *Config) FindProvider(name string) (Provider, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	if c.mu != nil {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+	}
 	for _, p := range c.Providers {
 		if strings.EqualFold(p.Name, name) {
 			return p, true
@@ -85,8 +90,10 @@ func (c *Config) FindProvider(name string) (Provider, bool) {
 // ProviderForModel maps a model identifier to a provider.
 // Convention: callers may use "providerName/model" or rely on registered models.
 func (c *Config) ProviderForModel(model string) (Provider, string, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	if c.mu != nil {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+	}
 
 	if idx := strings.Index(model, "/"); idx > 0 {
 		prefix := model[:idx]
@@ -116,6 +123,7 @@ func (c *Config) ProviderForModel(model string) (Provider, string, error) {
 
 func load() *Config {
 	c := &Config{
+		mu:            new(sync.RWMutex),
 		Listen:        envOr("LISTEN", ":8080"),
 		AdminToken:    envOr("ADMIN_TOKEN", "change-me-admin"),
 		DBPath:        envOr("DB_PATH", "data/ai-hub.db"),
