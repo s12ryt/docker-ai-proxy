@@ -38,11 +38,9 @@ func New(cfg *config.Config, st *store.Store, prx *proxy.Proxy) *Server {
 func (s *Server) Handler() http.Handler { return s.withRecover(s.withLogging(s.mux)) }
 
 func (s *Server) routes() {
-	// Static UI.
 	sub, _ := fs.Sub(webFS, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
 
-	// Public endpoints.
 	s.mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -52,18 +50,14 @@ func (s *Server) routes() {
 		})
 	})
 
-	// OpenAI-compatible API (token-guarded if access tokens configured).
 	s.mux.Handle("/v1/chat/completions", s.requireAccessToken(http.HandlerFunc(s.prx.ServeChatCompletions)))
 	s.mux.Handle("/v1/models", s.requireAccessToken(http.HandlerFunc(s.prx.ServeModels)))
 
-	// Admin / dashboard data endpoints (admin-token guarded).
 	s.mux.Handle("/api/summary", s.requireAdmin(http.HandlerFunc(s.handleSummary)))
 	s.mux.Handle("/api/providers", s.requireAdmin(http.HandlerFunc(s.handleProviders)))
 	s.mux.Handle("/api/recent", s.requireAdmin(http.HandlerFunc(s.handleRecent)))
 	s.mux.Handle("/api/runtime", s.requireAdmin(http.HandlerFunc(s.handleRuntime)))
 }
-
-// ---------- Handlers ----------
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	hours := 24
@@ -117,18 +111,16 @@ func (s *Server) handleRuntime(w http.ResponseWriter, _ *http.Request) {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	writeJSON(w, map[string]any{
-		"go_version":   runtime.Version(),
-		"goroutines":   runtime.NumGoroutine(),
-		"heap_alloc":   ms.HeapAlloc,
-		"heap_sys":     ms.HeapSys,
-		"num_gc":       ms.NumGC,
+		"go_version": runtime.Version(),
+		"goroutines": runtime.NumGoroutine(),
+		"heap_alloc": ms.HeapAlloc,
+		"heap_sys":   ms.HeapSys,
+		"num_gc":     ms.NumGC,
 		"started_at": s.cfg.StartedAt,
 		"uptime":     time.Since(s.cfg.StartedAt).Round(time.Second).String(),
 		"providers":  len(s.cfg.Snapshot().Providers),
 	})
 }
-
-// ---------- Middleware ----------
 
 func (s *Server) requireAccessToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,8 +171,6 @@ func (s *Server) withRecover(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-
-// ---------- helpers ----------
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

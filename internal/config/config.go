@@ -12,7 +12,7 @@ import (
 
 // Provider describes an upstream LLM provider configuration.
 type Provider struct {
-	Name        string   `json:"name"`         // "openai", "anthropic", "gemini", "deepseek", "openai-compatible"
+	Name        string   `json:"name"`
 	DisplayName string   `json:"display_name"`
 	BaseURL     string   `json:"base_url"`
 	APIKeys     []string `json:"api_keys"`
@@ -88,7 +88,7 @@ func (c *Config) FindProvider(name string) (Provider, bool) {
 }
 
 // ProviderForModel maps a model identifier to a provider.
-// Convention: callers may use "providerName/model" or rely on registered models.
+// Callers may use "providerName/model" or rely on registered models.
 func (c *Config) ProviderForModel(model string) (Provider, string, error) {
 	if c.mu != nil {
 		c.mu.RLock()
