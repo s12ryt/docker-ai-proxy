@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>控制台 · AI Hub</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c3aed'/%3E%3Cstop offset='1' stop-color='%2306b6d4'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath d='M20 44 L32 18 L44 44 M24 36 H40' fill='none' stroke='white' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="bg-orbs">
+  <span class="orb orb-1"></span>
+  <span class="orb orb-2"></span>
+  <span class="orb orb-3"></span>
+</div>
+
+<header class="nav glass">
+  <a class="brand" href="/">
+    <span class="logo"></span><span class="brand-text">AI Hub</span><span class="badge">控制台</span>
+  </a>
+  <nav>
+    <a href="/">首頁</a>
+    <a href="/healthz" target="_blank">健康</a>
+    <a class="cta" href="#" id="signout">登出</a>
+  </nav>
+</header>
+
+<main class="dash">
+  <div class="dash-head">
+    <h1>運行儀表板</h1>
+    <div class="controls">
+      <input id="admin-token" class="input" type="password" placeholder="管理員 Token (ADMIN_TOKEN)" autocomplete="off"/>
+      <select id="hours" class="input" style="min-width: 130px">
+        <option value="1">最近 1 小時</option>
+        <option value="6">最近 6 小時</option>
+        <option value="24" selected>最近 24 小時</option>
+        <option value="168">最近 7 天</option>
+      </select>
+      <button id="refresh" class="btn primary" style="padding:9px 18px">刷新</button>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi glass">
+      <div class="lbl">總請求</div>
+      <div class="val" id="kpi-calls">—</div>
+      <div class="sub" id="kpi-window">—</div>
+    </div>
+    <div class="kpi glass">
+      <div class="lbl">錯誤數</div>
+      <div class="val" id="kpi-errors">—</div>
+      <div class="sub" id="kpi-rate">—</div>
+    </div>
+    <div class="kpi glass">
+      <div class="lbl">平均延遲</div>
+      <div class="val" id="kpi-latency">—</div>
+      <div class="sub">毫秒 (上游往返)</div>
+    </div>
+    <div class="kpi glass">
+      <div class="lbl">Token 進出</div>
+      <div class="val" id="kpi-tokens">—</div>
+      <div class="sub" id="kpi-tokens-sub">輸入 / 輸出</div>
+    </div>
+  </div>
+
+  <div class="dash-grid">
+    <section class="panel glass">
+      <h3>按供應商分佈</h3>
+      <div id="bar-list" class="bar-list">
+        <div class="empty">輸入管理員 Token 後刷新以加載。</div>
+      </div>
+    </section>
+    <section class="panel glass">
+      <h3>運行資訊</h3>
+      <div id="runtime" class="bar-list">
+        <div class="empty">—</div>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel glass" style="margin-top:22px">
+    <h3>最近請求</h3>
+    <div style="overflow:auto">
+      <table id="recent-table">
+        <thead>
+          <tr>
+            <th>時間</th><th>供應商</th><th>模型</th><th>狀態</th>
+            <th>延遲</th><th>Tokens (in/out)</th><th>來源 IP</th>
+          </tr>
+        </thead>
+        <tbody><tr><td class="empty" colspan="7">尚無資料</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script src="/dashboard.js"></script>
+</body>
+</html>

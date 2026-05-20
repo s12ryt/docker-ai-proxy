@@ -1,0 +1,12 @@
+*.db
+*.db-journal
+/bin/
+/dist/
+/data/
+.env
+.env.local
+.idea/
+.vscode/
+*.log
+coverage.out
+coverage.html

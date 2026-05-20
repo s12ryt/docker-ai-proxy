@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>AI Hub — 多模型統一聚合與分發</title>
+<meta name="description" content="高效能的 AI 模型聚合網關:統一 OpenAI 相容介面,接入 OpenAI / Anthropic / Gemini / DeepSeek 等多家供應商,內建負載均衡、流式轉發、實時觀測。" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c3aed'/%3E%3Cstop offset='1' stop-color='%2306b6d4'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath d='M20 44 L32 18 L44 44 M24 36 H40' fill='none' stroke='white' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="bg-orbs">
+  <span class="orb orb-1"></span>
+  <span class="orb orb-2"></span>
+  <span class="orb orb-3"></span>
+</div>
+
+<header class="nav glass">
+  <a class="brand" href="/">
+    <span class="logo"></span>
+    <span class="brand-text">AI Hub</span>
+    <span class="badge">v1.0</span>
+  </a>
+  <nav>
+    <a href="#features">特性</a>
+    <a href="#providers">供應商</a>
+    <a href="#api">API</a>
+    <a href="/dashboard.html">控制台</a>
+    <a class="cta" href="https://github.com" target="_blank" rel="noopener">GitHub →</a>
+  </nav>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="hero-inner">
+      <span class="eyebrow">▲ AI Aggregation Gateway</span>
+      <h1>
+        統一介面 · 多模型 · <span class="grad">極速分發</span>
+      </h1>
+      <p class="lede">
+        以單一 OpenAI 相容 API 接入 <b>OpenAI</b>、<b>Anthropic</b>、<b>Gemini</b>、<b>DeepSeek</b> 等主流大模型。
+        內建密鑰池輪轉、流式轉發、實時監控與審計日誌 — 用 Go 撰寫,單檔部署,啟動 &lt; 100ms。
+      </p>
+      <div class="hero-cta">
+        <a class="btn primary" href="/dashboard.html">進入控制台 →</a>
+        <a class="btn ghost" href="#api">查看 API</a>
+      </div>
+      <div class="hero-stats">
+        <div><b id="stat-rps">—</b><span>當日請求</span></div>
+        <div><b id="stat-providers">—</b><span>已配置供應商</span></div>
+        <div><b id="stat-latency">—</b><span>平均延遲</span></div>
+        <div><b id="stat-uptime">—</b><span>運行時間</span></div>
+      </div>
+    </div>
+    <div class="hero-code glass">
+      <div class="code-head">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="code-title">curl</span>
+      </div>
+<pre><code>curl https://your-ai-hub.example.com/v1/chat/completions \
+  -H "Authorization: Bearer $AI_HUB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role":"user","content":"Hello!"}],
+    "stream": true
+  }'</code></pre>
+    </div>
+  </section>
+
+  <section id="features" class="grid features">
+    <article class="card glass">
+      <div class="ic ic-bolt"></div>
+      <h3>單檔極速部署</h3>
+      <p>Go 編譯為靜態二進制,Docker 鏡像 &lt; 25 MB,冷啟動 &lt; 100 ms,適合任何 VPS 或邊緣節點。</p>
+    </article>
+    <article class="card glass">
+      <div class="ic ic-net"></div>
+      <h3>OpenAI 完全相容</h3>
+      <p>已有 SDK / 客戶端零改動接入,僅替換 <code>base_url</code> 即可享用全部上游模型。</p>
+    </article>
+    <article class="card glass">
+      <div class="ic ic-shield"></div>
+      <h3>密鑰池 · 訪問控制</h3>
+      <p>支援多 API Key 輪轉、訪問令牌白名單、管理員 Token、IP 記錄與審計追蹤。</p>
+    </article>
+    <article class="card glass">
+      <div class="ic ic-chart"></div>
+      <h3>實時觀測</h3>
+      <p>SQLite 持久化每次呼叫,內建儀表板顯示 QPS、延遲、按供應商分佈與最近請求列表。</p>
+    </article>
+    <article class="card glass">
+      <div class="ic ic-stream"></div>
+      <h3>原生 SSE 流式</h3>
+      <p>對流式回應零緩衝直通轉發,延遲可媲美直連上游,適合即時對話與長文生成。</p>
+    </article>
+    <article class="card glass">
+      <div class="ic ic-cube"></div>
+      <h3>容器友善</h3>
+      <p>提供多架構(amd64/arm64)鏡像至 <code>ghcr.io</code>,GitHub Actions 自動測試與發佈。</p>
+    </article>
+  </section>
+
+  <section id="providers" class="providers">
+    <h2>已支援的供應商</h2>
+    <p class="sub">在 <code>config.json</code> 或環境變數中配置即可啟用 — 模型自動加入 <code>/v1/models</code>。</p>
+    <div class="prov-grid">
+      <div class="prov glass"><b>OpenAI</b><span>gpt-4o · o-series · gpt-3.5</span></div>
+      <div class="prov glass"><b>Anthropic</b><span>Claude Opus / Sonnet</span></div>
+      <div class="prov glass"><b>Google Gemini</b><span>1.5 / 2.0 系列</span></div>
+      <div class="prov glass"><b>DeepSeek</b><span>chat · reasoner</span></div>
+      <div class="prov glass dim"><b>任意 OpenAI 相容</b><span>自訂 base_url</span></div>
+    </div>
+  </section>
+
+  <section id="api" class="api">
+    <h2>三步上手</h2>
+    <div class="steps">
+      <div class="step glass">
+        <span class="num">1</span>
+        <h4>使用 Docker 啟動</h4>
+<pre><code>docker run -d --name ai-hub \
+  -p 8080:8080 \
+  -v $(pwd)/data:/data \
+  -v $(pwd)/config.json:/app/config.json \
+  ghcr.io/yourname/ai-hub:latest</code></pre>
+      </div>
+      <div class="step glass">
+        <span class="num">2</span>
+        <h4>編輯 config.json</h4>
+<pre><code>{
+  "providers": [{
+    "name": "openai",
+    "enabled": true,
+    "base_url": "https://api.openai.com",
+    "api_keys": ["sk-..."],
+    "models": ["gpt-4o-mini"]
+  }]
+}</code></pre>
+      </div>
+      <div class="step glass">
+        <span class="num">3</span>
+        <h4>用任何 OpenAI SDK 呼叫</h4>
+<pre><code>from openai import OpenAI
+client = OpenAI(
+  base_url="http://localhost:8080/v1",
+  api_key="your-access-token")
+print(client.chat.completions.create(
+  model="gpt-4o-mini",
+  messages=[{"role":"user","content":"hi"}]
+))</code></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div>© <span id="year"></span> AI Hub · Built with Go · MIT Licensed</div>
+  <div class="foot-links">
+    <a href="/healthz">健康檢查</a>
+    <a href="/dashboard.html">控制台</a>
+    <a href="https://github.com" target="_blank" rel="noopener">原始碼</a>
+  </div>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+services:
+  ai-hub:
+    image: ghcr.io/s12ryt/docker-ai-proxy:latest
+    build: .
+    container_name: ai-hub
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ADMIN_TOKEN: "change-me-please"
+      ACCESS_TOKENS: "client-token-1,client-token-2"
+    volumes:
+      - ./data:/data
+      - ./config.json:/app/config.json:ro
+    healthcheck:
+      test: ["CMD", "/app/ai-hub", "-version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

@@ -1,0 +1,220 @@
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"log"
+	"os"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Provider describes an upstream LLM provider configuration.
+type Provider struct {
+	Name        string   `json:"name"`         // "openai", "anthropic", "gemini", "deepseek", "openai-compatible"
+	DisplayName string   `json:"display_name"`
+	BaseURL     string   `json:"base_url"`
+	APIKeys     []string `json:"api_keys"`
+	Models      []string `json:"models"`
+	Enabled     bool     `json:"enabled"`
+	Weight      int      `json:"weight"`
+	TimeoutSec  int      `json:"timeout_sec"`
+}
+
+// Config is the application configuration.
+type Config struct {
+	Listen        string     `json:"listen"`
+	AdminToken    string     `json:"admin_token"`
+	AccessTokens  []string   `json:"access_tokens"`
+	DBPath        string     `json:"db_path"`
+	Providers     []Provider `json:"providers"`
+	EnableMetrics bool       `json:"enable_metrics"`
+	StartedAt     time.Time  `json:"-"`
+
+	mu sync.RWMutex
+}
+
+var (
+	current *Config
+	once    sync.Once
+)
+
+// Get returns the current config (thread-safe snapshot).
+func Get() *Config {
+	once.Do(func() {
+		current = load()
+	})
+	return current
+}
+
+// Reload re-reads configuration from disk (if a config file is present).
+func Reload() {
+	c := load()
+	current.mu.Lock()
+	defer current.mu.Unlock()
+	current.Listen = c.Listen
+	current.AdminToken = c.AdminToken
+	current.AccessTokens = c.AccessTokens
+	current.Providers = c.Providers
+	current.EnableMetrics = c.EnableMetrics
+}
+
+// Snapshot returns a deep-ish copy safe for read-only use.
+func (c *Config) Snapshot() Config {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := *c
+	out.Providers = append([]Provider(nil), c.Providers...)
+	out.AccessTokens = append([]string(nil), c.AccessTokens...)
+	return out
+}
+
+// FindProvider locates a provider by name (case-insensitive).
+func (c *Config) FindProvider(name string) (Provider, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, p := range c.Providers {
+		if strings.EqualFold(p.Name, name) {
+			return p, true
+		}
+	}
+	return Provider{}, false
+}
+
+// ProviderForModel maps a model identifier to a provider.
+// Convention: callers may use "providerName/model" or rely on registered models.
+func (c *Config) ProviderForModel(model string) (Provider, string, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if idx := strings.Index(model, "/"); idx > 0 {
+		prefix := model[:idx]
+		rest := model[idx+1:]
+		for _, p := range c.Providers {
+			if !p.Enabled {
+				continue
+			}
+			if strings.EqualFold(p.Name, prefix) {
+				return p, rest, nil
+			}
+		}
+	}
+
+	for _, p := range c.Providers {
+		if !p.Enabled {
+			continue
+		}
+		for _, m := range p.Models {
+			if strings.EqualFold(m, model) {
+				return p, model, nil
+			}
+		}
+	}
+	return Provider{}, "", errors.New("no provider available for model: " + model)
+}
+
+func load() *Config {
+	c := &Config{
+		Listen:        envOr("LISTEN", ":8080"),
+		AdminToken:    envOr("ADMIN_TOKEN", "change-me-admin"),
+		DBPath:        envOr("DB_PATH", "data/ai-hub.db"),
+		EnableMetrics: envOr("ENABLE_METRICS", "1") == "1",
+		StartedAt:     time.Now(),
+	}
+
+	if tokens := os.Getenv("ACCESS_TOKENS"); tokens != "" {
+		for _, t := range strings.Split(tokens, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				c.AccessTokens = append(c.AccessTokens, t)
+			}
+		}
+	}
+
+	path := envOr("CONFIG_PATH", "config.json")
+	if data, err := os.ReadFile(path); err == nil {
+		var fileCfg Config
+		if err := json.Unmarshal(data, &fileCfg); err != nil {
+			log.Printf("[config] parse %s failed: %v", path, err)
+		} else {
+			if fileCfg.Listen != "" {
+				c.Listen = fileCfg.Listen
+			}
+			if fileCfg.AdminToken != "" {
+				c.AdminToken = fileCfg.AdminToken
+			}
+			if fileCfg.DBPath != "" {
+				c.DBPath = fileCfg.DBPath
+			}
+			if len(fileCfg.AccessTokens) > 0 {
+				c.AccessTokens = fileCfg.AccessTokens
+			}
+			if len(fileCfg.Providers) > 0 {
+				c.Providers = fileCfg.Providers
+			}
+		}
+	}
+
+	if len(c.Providers) == 0 {
+		c.Providers = defaultProviders()
+	}
+
+	for i := range c.Providers {
+		if c.Providers[i].TimeoutSec == 0 {
+			c.Providers[i].TimeoutSec = 120
+		}
+		if c.Providers[i].Weight == 0 {
+			c.Providers[i].Weight = 1
+		}
+	}
+	return c
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func defaultProviders() []Provider {
+	return []Provider{
+		{
+			Name:        "openai",
+			DisplayName: "OpenAI",
+			BaseURL:     "https://api.openai.com",
+			Models:      []string{"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"},
+			Enabled:     false,
+			Weight:      1,
+			TimeoutSec:  120,
+		},
+		{
+			Name:        "anthropic",
+			DisplayName: "Anthropic",
+			BaseURL:     "https://api.anthropic.com",
+			Models:      []string{"claude-opus-4", "claude-sonnet-4", "claude-3-5-sonnet"},
+			Enabled:     false,
+			Weight:      1,
+			TimeoutSec:  120,
+		},
+		{
+			Name:        "gemini",
+			DisplayName: "Google Gemini",
+			BaseURL:     "https://generativelanguage.googleapis.com",
+			Models:      []string{"gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash"},
+			Enabled:     false,
+			Weight:      1,
+			TimeoutSec:  120,
+		},
+		{
+			Name:        "deepseek",
+			DisplayName: "DeepSeek",
+			BaseURL:     "https://api.deepseek.com",
+			Models:      []string{"deepseek-chat", "deepseek-reasoner"},
+			Enabled:     false,
+			Weight:      1,
+			TimeoutSec:  120,
+		},
+	}
+}
