@@ -9,21 +9,19 @@ ARG COMMIT=unknown
 
 WORKDIR /src
 
-# Cache dependencies first.
-COPY go.mod go.sum* ./
-RUN go mod download || true
-
-# Source.
+# Copy everything so we have full source for module resolution.
 COPY . .
 
-# Pure-Go SQLite driver (modernc.org/sqlite) means CGO_ENABLED=0 — clean cross compile.
-ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
+ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOFLAGS=-mod=mod
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    go mod tidy && \
+    set -eux; \
+    go mod tidy; \
+    go mod download; \
     go build -trimpath \
         -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
-        -o /out/ai-hub ./cmd/ai-hub
+        -o /out/ai-hub ./cmd/ai-hub; \
+    ls -lh /out/ai-hub
 
 # ---------- runtime stage ----------
 FROM gcr.io/distroless/static-debian12:nonroot
