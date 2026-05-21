@@ -21,7 +21,7 @@ func newTestServer(t *testing.T) (*Server, *config.Config) {
 			BaseURL: "http://127.0.0.1:1", Models: []string{"m"}, TimeoutSec: 1,
 		}},
 	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

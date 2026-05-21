@@ -25,18 +25,20 @@ type Provider struct {
 
 // Config is the application configuration.
 type Config struct {
-	Listen        string     `json:"listen"`
-	AdminToken    string     `json:"admin_token"`
-	AccessTokens  []string   `json:"access_tokens"`
-	DBPath        string     `json:"db_path"`
-	DBDriver      string     `json:"db_driver"`
-	DBDSN         string     `json:"db_dsn"`
-	DBMaxOpen     int        `json:"db_max_open_conns"`
-	DBMaxIdle     int        `json:"db_max_idle_conns"`
-	DBConnMaxLife string     `json:"db_conn_max_lifetime"`
-	Providers     []Provider `json:"providers"`
-	EnableMetrics bool       `json:"enable_metrics"`
-	StartedAt     time.Time  `json:"-"`
+	Listen         string     `json:"listen"`
+	AdminToken     string     `json:"admin_token"`
+	AccessTokens   []string   `json:"access_tokens"`
+	TelegramUserID string     `json:"telegram_user_id"`
+	TelegramBotID  string     `json:"telegram_bot_id"`
+	DBPath         string     `json:"db_path"`
+	DBDriver       string     `json:"db_driver"`
+	DBDSN          string     `json:"db_dsn"`
+	DBMaxOpen      int        `json:"db_max_open_conns"`
+	DBMaxIdle      int        `json:"db_max_idle_conns"`
+	DBConnMaxLife  string     `json:"db_conn_max_lifetime"`
+	Providers      []Provider `json:"providers"`
+	EnableMetrics  bool       `json:"enable_metrics"`
+	StartedAt      time.Time  `json:"-"`
 
 	mu *sync.RWMutex
 }
@@ -69,6 +71,8 @@ func Reload() {
 	current.Listen = c.Listen
 	current.AdminToken = c.AdminToken
 	current.AccessTokens = c.AccessTokens
+	current.TelegramUserID = c.TelegramUserID
+	current.TelegramBotID = c.TelegramBotID
 	current.DBPath = c.DBPath
 	current.DBDriver = c.DBDriver
 	current.DBDSN = c.DBDSN
@@ -143,25 +147,12 @@ func (c *Config) ProviderForModel(model string) (Provider, string, error) {
 func load() *Config {
 	c := &Config{
 		mu:            new(sync.RWMutex),
-		Listen:        envOr("LISTEN", ":8080"),
-		AdminToken:    envOr("ADMIN_TOKEN", "change-me-admin"),
-		DBPath:        envOr("DB_PATH", "data/ai-hub.db"),
-		DBDriver:      envOr("DB_DRIVER", "sqlite"),
-		DBDSN:         os.Getenv("DB_DSN"),
-		DBMaxOpen:     envInt("DB_MAX_OPEN_CONNS", 0),
-		DBMaxIdle:     envInt("DB_MAX_IDLE_CONNS", 0),
-		DBConnMaxLife: os.Getenv("DB_CONN_MAX_LIFETIME"),
-		EnableMetrics: envOr("ENABLE_METRICS", "1") == "1",
+		Listen:        ":8080",
+		AdminToken:    "change-me-admin",
+		DBPath:        "data/ai-hub.db",
+		DBDriver:      "sqlite",
+		EnableMetrics: true,
 		StartedAt:     time.Now(),
-	}
-
-	if tokens := os.Getenv("ACCESS_TOKENS"); tokens != "" {
-		for _, t := range strings.Split(tokens, ",") {
-			t = strings.TrimSpace(t)
-			if t != "" {
-				c.AccessTokens = append(c.AccessTokens, t)
-			}
-		}
 	}
 
 	path := envOr("CONFIG_PATH", "config.json")
@@ -175,6 +166,15 @@ func load() *Config {
 			}
 			if fileCfg.AdminToken != "" {
 				c.AdminToken = fileCfg.AdminToken
+			}
+			if len(fileCfg.AccessTokens) > 0 {
+				c.AccessTokens = fileCfg.AccessTokens
+			}
+			if fileCfg.TelegramUserID != "" {
+				c.TelegramUserID = fileCfg.TelegramUserID
+			}
+			if fileCfg.TelegramBotID != "" {
+				c.TelegramBotID = fileCfg.TelegramBotID
 			}
 			if fileCfg.DBPath != "" {
 				c.DBPath = fileCfg.DBPath
@@ -194,14 +194,13 @@ func load() *Config {
 			if fileCfg.DBConnMaxLife != "" {
 				c.DBConnMaxLife = fileCfg.DBConnMaxLife
 			}
-			if len(fileCfg.AccessTokens) > 0 {
-				c.AccessTokens = fileCfg.AccessTokens
-			}
 			if len(fileCfg.Providers) > 0 {
 				c.Providers = fileCfg.Providers
 			}
 		}
 	}
+
+	applyEnvOverrides(c)
 
 	if len(c.Providers) == 0 {
 		c.Providers = defaultProviders()
@@ -223,6 +222,56 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func applyEnvOverrides(c *Config) {
+	if v := os.Getenv("LISTEN"); v != "" {
+		c.Listen = v
+	}
+	if v := os.Getenv("ADMIN_TOKEN"); v != "" {
+		c.AdminToken = v
+	}
+	if tokens := os.Getenv("ACCESS_TOKENS"); tokens != "" {
+		c.AccessTokens = splitCSV(tokens)
+	}
+	if v := os.Getenv("TELEGRAM_USER_ID"); v != "" {
+		c.TelegramUserID = v
+	}
+	if v := os.Getenv("TELEGRAM_BOT_ID"); v != "" {
+		c.TelegramBotID = v
+	}
+	if v := os.Getenv("DB_PATH"); v != "" {
+		c.DBPath = v
+	}
+	if v := os.Getenv("DB_DRIVER"); v != "" {
+		c.DBDriver = v
+	}
+	if v := os.Getenv("DB_DSN"); v != "" {
+		c.DBDSN = v
+	}
+	if v := envInt("DB_MAX_OPEN_CONNS", c.DBMaxOpen); v != c.DBMaxOpen {
+		c.DBMaxOpen = v
+	}
+	if v := envInt("DB_MAX_IDLE_CONNS", c.DBMaxIdle); v != c.DBMaxIdle {
+		c.DBMaxIdle = v
+	}
+	if v := os.Getenv("DB_CONN_MAX_LIFETIME"); v != "" {
+		c.DBConnMaxLife = v
+	}
+	if v := os.Getenv("ENABLE_METRICS"); v != "" {
+		c.EnableMetrics = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+	}
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, t := range strings.Split(s, ",") {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // envInt reads a positive integer from the named environment variable. Missing

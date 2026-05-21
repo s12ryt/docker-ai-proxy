@@ -85,7 +85,7 @@ func TestServeChatCompletions_EndToEnd(t *testing.T) {
 	defer upstream.Close()
 
 	tmp := t.TempDir()
-	st, err := store.Open(filepath.Join(tmp, "test.db"))
+	st, err := store.OpenSQLite(filepath.Join(tmp, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestServeChatCompletions_UpstreamError(t *testing.T) {
 	}))
 	defer upstream.Close()
 	tmp := t.TempDir()
-	st, _ := store.Open(filepath.Join(tmp, "t.db"))
+	st, _ := store.OpenSQLite(filepath.Join(tmp, "t.db"))
 	defer st.Close()
 
 	cfg := &config.Config{Providers: []config.Provider{{

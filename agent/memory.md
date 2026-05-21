@@ -16,7 +16,7 @@
 - 最新 commit: `b346ef0` "ci: add server+main tests, drop atomic covermode, harden Dockerfile build"
 - 工作樹乾淨
 
-### 找到的 6 個缺陷 + 修復
+### 找到的 7 個缺陷 + 修復
 
 | # | 嚴重度 | 問題 | 修復 |
 |---|---|---|---|
@@ -26,6 +26,7 @@
 | 4 | 中 | `server.withLogging` 是空殼，沒任何輸出 | 改為真 access log，包 `loggingResponseWriter`（status 抓取 + Flush forward），跳過 /healthz、/style.css、/app.js、/dashboard.js |
 | 5 | 中 | `proxy.ServeChatCompletions` 用 `io.Copy`，SSE 延遲到 stream 結束才送 | 32KB 緩衝迴圈 + 每塊 `flusher.Flush()`；正確處理 EOF/Canceled/ShortWrite；記錄 BytesOut |
 | 6 | 低 | `index.html` GitHub 連結兩處是 `https://github.com`（空連結） | 改為 `https://github.com/s12ryt/docker-ai-proxy` |
+| 7 | 中 | `store.Open` 簽名已改成 `Open(cfg Config)`，但測試還在呼叫舊 API，CI 會編譯失敗；另外 `config.load()` 原本是 config.json 蓋掉 env，與文件相反，會讓雲端 DB / Telegram env 被覆蓋 | 把測試改成 `OpenSQLite(...)`，並重構 config 載入為 `defaults → config.json → env`，讓 env 最後覆蓋 |
 
 ### 已知不修的限制（記錄供後續演進）
 

@@ -9,6 +9,9 @@ services:
     environment:
       ADMIN_TOKEN: "change-me-please"
       ACCESS_TOKENS: "client-token-1,client-token-2"
+      # ---- Telegram Bot 參數 (預留給通知/審計整合) ----
+      # TELEGRAM_USER_ID: "123456789"
+      # TELEGRAM_BOT_ID: "987654321"
       # ---- 資料庫驅動 (預設 sqlite,純檔案,無外部依賴) ----
       # DB_DRIVER: "sqlite"
       # DB_PATH: "/data/ai-hub.db"

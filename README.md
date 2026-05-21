@@ -60,6 +60,8 @@ go build -o ai-hub ./cmd/ai-hub
 | `LISTEN` | `:8080` | 監聽地址 |
 | `ADMIN_TOKEN` | `change-me-admin` | 控制台與 `/api/*` 認證 Token |
 | `ACCESS_TOKENS` | (空) | 逗號分隔的客戶端訪問 Token;空表示開放呼叫 |
+| `TELEGRAM_USER_ID` | (空) | Telegram 使用者 ID（預留給通知/審計整合） |
+| `TELEGRAM_BOT_ID` | (空) | Telegram Bot ID（預留給通知/審計整合） |
 | `DB_DRIVER` | `sqlite` | 資料庫驅動,可選 `sqlite` / `mysql` / `postgres` |
 | `DB_PATH` | `data/ai-hub.db` | SQLite 檔案路徑(僅 `DB_DRIVER=sqlite` 時生效) |
 | `DB_DSN` | (空) | MySQL / PostgreSQL 連線字串,`mysql` 與 `postgres` 必填 |
@@ -110,6 +112,8 @@ DSN 格式:
 {
   "admin_token": "please-change",
   "access_tokens": ["client-token-1"],
+  "telegram_user_id": "123456789",
+  "telegram_bot_id": "987654321",
   "providers": [
     {
       "name": "openai",

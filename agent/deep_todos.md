@@ -11,6 +11,10 @@
 - [x] **P1** `proxy.ServeChatCompletions` 32KB 緩衝 + per-chunk flush 流式
 - [x] **P2** index.html GitHub 連結指向 s12ryt/docker-ai-proxy
 - [x] **P2** 建立 agent/ 目錄 (項目表 / memory / deep_todos)
+- [x] **P1** 雲端 DB 支援：DB_DRIVER / DB_DSN / 池設定，支援 SQLite / MySQL / PostgreSQL 三選一
+- [x] **P1** Telegram 參數變量化：`TELEGRAM_USER_ID` / `TELEGRAM_BOT_ID` 同步支援 env 與 config.json
+- [x] **P1** 修正 config 載入優先級：env 最後覆蓋 config.json，避免部署環境被檔案設定吃掉
+- [x] **P1** 修正測試相容性：`store.Open(path)` 舊呼叫改為 `OpenSQLite(path)`
 
 ## 已完成 (雲端 DB 增強 · 2026-05-21)
 
