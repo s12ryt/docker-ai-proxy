@@ -15,7 +15,7 @@
 - **密鑰池**:每個供應商可配置多把 Key,自動輪轉
 - **訪問控制**:管理員 Token + 客戶端訪問 Token 白名單
 - **流式 SSE 透傳**:零緩衝,延遲幾乎等同直連上游
-- **實時觀測**:SQLite(純 Go,無 CGO)記錄每次呼叫,內建儀表板
+- **實時觀測**:SQLite / MySQL / PostgreSQL 三選一(純 Go 驅動,無 CGO)記錄每次呼叫,內建儀表板
 - **單檔部署**:Go 靜態二進制,Docker 鏡像基於 `distroless/static` 約 20-25 MB
 - **多架構鏡像**:`linux/amd64` + `linux/arm64`,自動發佈到 `ghcr.io`
 
@@ -60,9 +60,49 @@ go build -o ai-hub ./cmd/ai-hub
 | `LISTEN` | `:8080` | 監聽地址 |
 | `ADMIN_TOKEN` | `change-me-admin` | 控制台與 `/api/*` 認證 Token |
 | `ACCESS_TOKENS` | (空) | 逗號分隔的客戶端訪問 Token;空表示開放呼叫 |
-| `DB_PATH` | `data/ai-hub.db` | SQLite 路徑 |
+| `DB_DRIVER` | `sqlite` | 資料庫驅動,可選 `sqlite` / `mysql` / `postgres` |
+| `DB_PATH` | `data/ai-hub.db` | SQLite 檔案路徑(僅 `DB_DRIVER=sqlite` 時生效) |
+| `DB_DSN` | (空) | MySQL / PostgreSQL 連線字串,`mysql` 與 `postgres` 必填 |
+| `DB_MAX_OPEN_CONNS` | sqlite=1, 其他=10 | 最大開啟連線數 |
+| `DB_MAX_IDLE_CONNS` | sqlite=1, 其他=5 | 最大閒置連線數 |
+| `DB_CONN_MAX_LIFETIME` | 雲端=`30m` | Go duration,例如 `15m`、`1h`。SQLite 留空 |
 | `CONFIG_PATH` | `config.json` | 配置檔路徑 |
 | `ENABLE_METRICS` | `1` | 是否記錄統計 |
+
+### ☁️ 切換到雲端 MySQL / PostgreSQL
+
+預設使用內嵌的純 Go SQLite — 部署即用、不需任何外部服務。
+若你想多副本部署、跨主機共享統計資料,或避免本機磁碟寫入,可直接改 `DB_DRIVER`:
+
+```bash
+# MySQL / MariaDB / PlanetScale / TiDB Cloud / AWS RDS for MySQL
+docker run -d --name ai-hub \
+  -p 8080:8080 \
+  -e ADMIN_TOKEN=please-change-me \
+  -e DB_DRIVER=mysql \
+  -e DB_DSN="aihub:secret@tcp(mysql.internal:3306)/aihub?parseTime=true&charset=utf8mb4&loc=UTC" \
+  ghcr.io/s12ryt/docker-ai-proxy:latest
+
+# PostgreSQL / Neon / Supabase / AWS RDS for PostgreSQL
+docker run -d --name ai-hub \
+  -p 8080:8080 \
+  -e ADMIN_TOKEN=please-change-me \
+  -e DB_DRIVER=postgres \
+  -e DB_DSN="postgres://aihub:secret@pg.internal:5432/aihub?sslmode=require" \
+  ghcr.io/s12ryt/docker-ai-proxy:latest
+```
+
+DSN 格式:
+
+| 驅動 | 範例 |
+| --- | --- |
+| `mysql` | `user:pass@tcp(host:3306)/dbname?parseTime=true&charset=utf8mb4&loc=UTC` |
+| `postgres` | `postgres://user:pass@host:5432/dbname?sslmode=require` |
+
+切換 driver 時:
+- 啟動會自動 `CREATE TABLE IF NOT EXISTS` 與索引 — 無需手動 migration
+- 啟動會做 10 秒 ping,連不上會 fail-fast 印出明確錯誤
+- 雲端 DB 不需要 `-v ./data:/data` 掛載,docker-compose 中可刪除該行
 
 ### `config.json` 範本
 
@@ -155,7 +195,7 @@ print(resp.choices[0].message.content)
 │   ├── config/          # 配置載入(env + json)
 │   ├── providers/       # 密鑰輪轉
 │   ├── proxy/           # 上游請求路由與轉發
-│   ├── store/           # SQLite 持久化(modernc.org/sqlite,純 Go)
+│   ├── store/           # 持久化:SQLite / MySQL / PostgreSQL 三選一(純 Go 驅動,無 CGO)
 │   └── server/          # HTTP 路由、中間件、嵌入靜態頁
 │       └── web/         # 玻璃擬態前端(landing + dashboard)
 ├── .github/workflows/

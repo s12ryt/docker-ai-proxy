@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -29,14 +28,27 @@ func main() {
 	}
 	cfg := config.Get()
 
-	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
-		log.Fatalf("create data dir: %v", err)
+	stCfg := store.Config{
+		Driver:       cfg.DBDriver,
+		DSN:          cfg.DBDSN,
+		Path:         cfg.DBPath,
+		MaxOpenConns: cfg.DBMaxOpen,
+		MaxIdleConns: cfg.DBMaxIdle,
 	}
-	st, err := store.Open(cfg.DBPath)
+	if cfg.DBConnMaxLife != "" {
+		if d, err := time.ParseDuration(cfg.DBConnMaxLife); err == nil {
+			stCfg.ConnMaxLifetime = d
+		} else {
+			log.Printf("[main] invalid DB_CONN_MAX_LIFETIME=%q: %v (ignored)", cfg.DBConnMaxLife, err)
+		}
+	}
+
+	st, err := store.Open(stCfg)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
+	log.Printf("ai-hub: store driver=%s", st.Driver())
 
 	prx := proxy.New(cfg, st)
 	srv := server.New(cfg, st, prx)

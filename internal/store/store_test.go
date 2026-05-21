@@ -9,7 +9,7 @@ import (
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	st, err := OpenSQLite(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

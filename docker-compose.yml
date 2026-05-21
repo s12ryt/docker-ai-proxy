@@ -9,6 +9,22 @@ services:
     environment:
       ADMIN_TOKEN: "change-me-please"
       ACCESS_TOKENS: "client-token-1,client-token-2"
+      # ---- 資料庫驅動 (預設 sqlite,純檔案,無外部依賴) ----
+      # DB_DRIVER: "sqlite"
+      # DB_PATH: "/data/ai-hub.db"
+      #
+      # ---- 改用雲端 MySQL (例如 PlanetScale / AWS RDS / 自架 MariaDB) ----
+      # DB_DRIVER: "mysql"
+      # DB_DSN: "aihub:secret@tcp(mysql.internal:3306)/aihub?parseTime=true&charset=utf8mb4&loc=UTC"
+      #
+      # ---- 改用雲端 PostgreSQL (例如 Neon / Supabase / RDS) ----
+      # DB_DRIVER: "postgres"
+      # DB_DSN: "postgres://aihub:secret@pg.internal:5432/aihub?sslmode=require"
+      #
+      # ---- 雲端 DB 連線池調校 (可選) ----
+      # DB_MAX_OPEN_CONNS: "10"
+      # DB_MAX_IDLE_CONNS: "5"
+      # DB_CONN_MAX_LIFETIME: "30m"
     volumes:
       - ./data:/data
       - ./config.json:/app/config.json:ro

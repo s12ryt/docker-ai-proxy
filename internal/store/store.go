@@ -5,16 +5,48 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/go-sql-driver/mysql"  // mysql driver
+	_ "github.com/jackc/pgx/v5/stdlib"  // pgx driver (database/sql adapter)
+	_ "modernc.org/sqlite"               // pure-go sqlite driver
 )
 
-// Store wraps a SQLite database used for request logs and aggregated metrics.
+// Store wraps a SQL database used for request logs and aggregated metrics. It
+// supports SQLite (default, file-based, pure-go via modernc.org/sqlite), MySQL
+// (github.com/go-sql-driver/mysql) and PostgreSQL (jackc/pgx in database/sql
+// mode). Schema and placeholder differences are encapsulated in the dialect.
 type Store struct {
-	db *sql.DB
-	mu sync.Mutex
+	db      *sql.DB
+	dialect dialect
+	mu      sync.Mutex
+}
+
+// Config controls how the underlying database connection is opened.
+//
+// Driver selects the SQL flavour. Values: "sqlite" (default, empty also
+// accepted), "mysql", "postgres". DSN is the driver-specific connection
+// string. For SQLite, DSN is the file path (Path is accepted as a legacy
+// alias). For MySQL the DSN follows go-sql-driver/mysql's format, e.g.
+//   user:pass@tcp(host:3306)/dbname?parseTime=true&charset=utf8mb4&loc=UTC
+// For PostgreSQL it follows pgx's URL form, e.g.
+//   postgres://user:pass@host:5432/dbname?sslmode=require
+//
+// MaxOpenConns / MaxIdleConns / ConnMaxLifetime tune the connection pool. The
+// defaults are conservative and safe for embedded SQLite as well as cloud
+// MySQL/Postgres (which typically expose ~100 connections to the database
+// user). Set MaxOpenConns to a positive number to override.
+type Config struct {
+	Driver          string
+	DSN             string
+	Path            string // legacy alias for DSN when Driver == "sqlite"
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
 }
 
 // CallRecord describes a single upstream call.
@@ -34,22 +66,58 @@ type CallRecord struct {
 	ErrMessage string
 }
 
-// Open initialises the SQLite store and applies the schema.
-func Open(path string) (*Store, error) {
-	if path == "" {
-		return nil, errors.New("empty db path")
-	}
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+// Open initialises the store and applies the schema. For backwards
+// compatibility a bare file path is still accepted as the first argument via
+// OpenSQLite.
+func Open(cfg Config) (*Store, error) {
+	d, err := resolveDialect(cfg.Driver)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return nil, err
 	}
-	db.SetMaxOpenConns(1) // SQLite serialises writes; keep it simple.
-	s := &Store{db: db}
+
+	dsn, err := resolveDSN(d, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	db, err := sql.Open(d.driverName, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", d.name, err)
+	}
+
+	applyPool(db, d, cfg)
+
+	// Sanity-check the connection before returning; cloud DBs commonly fail
+	// here (auth, TLS, firewall) and a quick ping gives a much nicer error
+	// than a deferred crash on the first query.
+	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping %s: %w", d.name, err)
+	}
+
+	s := &Store{db: db, dialect: d}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// OpenSQLite is a convenience wrapper preserving the original single-argument
+// API used by tests and the CLI when only a file path is supplied.
+func OpenSQLite(path string) (*Store, error) {
+	return Open(Config{Driver: "sqlite", Path: path})
+}
+
+// Driver returns the active dialect name (sqlite/mysql/postgres). Useful for
+// logging and /api/runtime introspection.
+func (s *Store) Driver() string {
+	if s == nil {
+		return ""
+	}
+	return s.dialect.name
 }
 
 // Close releases database resources.
@@ -64,27 +132,12 @@ func (s *Store) Close() error {
 func (s *Store) DB() *sql.DB { return s.db }
 
 func (s *Store) migrate() error {
-	const schema = `
-CREATE TABLE IF NOT EXISTS calls (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts INTEGER NOT NULL,
-    provider TEXT NOT NULL,
-    model TEXT NOT NULL,
-    path TEXT NOT NULL,
-    status INTEGER NOT NULL,
-    latency_ms INTEGER NOT NULL,
-    bytes_in INTEGER NOT NULL DEFAULT 0,
-    bytes_out INTEGER NOT NULL DEFAULT 0,
-    tokens_in INTEGER NOT NULL DEFAULT 0,
-    tokens_out INTEGER NOT NULL DEFAULT 0,
-    client_ip TEXT,
-    err TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);
-CREATE INDEX IF NOT EXISTS idx_calls_provider_ts ON calls(provider, ts);
-`
-	_, err := s.db.Exec(schema)
-	return err
+	for _, stmt := range s.dialect.schema {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate (%s): %w", s.dialect.name, err)
+		}
+	}
+	return nil
 }
 
 // LogCall persists a single call record.
@@ -92,11 +145,15 @@ func (s *Store) LogCall(ctx context.Context, r CallRecord) error {
 	if r.Timestamp.IsZero() {
 		r.Timestamp = time.Now()
 	}
+	// SQLite serialises writes via a single connection (we set MaxOpenConns=1
+	// for the sqlite dialect). For MySQL/Postgres the database itself
+	// arbitrates writes so we don't need the extra mutex hop, but holding it
+	// briefly doesn't hurt and keeps log ordering predictable in tests.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO calls(ts, provider, model, path, status, latency_ms, bytes_in, bytes_out, tokens_in, tokens_out, client_ip, err)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		s.dialect.rebind(`INSERT INTO calls(ts, provider, model, path, status, latency_ms, bytes_in, bytes_out, tokens_in, tokens_out, client_ip, err)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`),
 		r.Timestamp.UnixMilli(), r.Provider, r.Model, r.Path, r.Status, r.LatencyMS,
 		r.BytesIn, r.BytesOut, r.TokensIn, r.TokensOut, r.ClientIP, r.ErrMessage,
 	)
@@ -131,26 +188,26 @@ func (s *Store) Summarize(ctx context.Context, hours int) (*Summary, error) {
 	since := time.Now().Add(-time.Duration(hours) * time.Hour).UnixMilli()
 
 	row := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(1),
+		s.dialect.rebind(`SELECT COUNT(1),
 		        COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0),
 		        COALESCE(AVG(latency_ms), 0),
 		        COALESCE(SUM(tokens_in), 0),
 		        COALESCE(SUM(tokens_out), 0)
-		   FROM calls WHERE ts >= ?`, since)
+		   FROM calls WHERE ts >= ?`), since)
 	sum := &Summary{WindowHours: hours, Providers: map[string]ProviderStat{}}
 	if err := row.Scan(&sum.TotalCalls, &sum.TotalErrors, &sum.AvgLatencyMS, &sum.TokensIn, &sum.TokensOut); err != nil {
 		return nil, err
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT provider,
+		s.dialect.rebind(`SELECT provider,
 		        COUNT(1),
-		        SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
+		        COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0),
 		        COALESCE(AVG(latency_ms), 0),
 		        COALESCE(SUM(tokens_in), 0),
 		        COALESCE(SUM(tokens_out), 0)
 		   FROM calls WHERE ts >= ?
-		  GROUP BY provider`, since)
+		  GROUP BY provider`), since)
 	if err != nil {
 		return nil, err
 	}
@@ -172,8 +229,8 @@ func (s *Store) RecentCalls(ctx context.Context, limit int) ([]CallRecord, error
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, ts, provider, model, path, status, latency_ms, bytes_in, bytes_out, tokens_in, tokens_out, COALESCE(client_ip,''), COALESCE(err,'')
-		   FROM calls ORDER BY id DESC LIMIT ?`, limit)
+		s.dialect.rebind(`SELECT id, ts, provider, model, path, status, latency_ms, bytes_in, bytes_out, tokens_in, tokens_out, COALESCE(client_ip,''), COALESCE(err,'')
+		   FROM calls ORDER BY id DESC LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -190,4 +247,83 @@ func (s *Store) RecentCalls(ctx context.Context, limit int) ([]CallRecord, error
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// resolveDSN derives the final connection string for the dialect. For sqlite
+// it also ensures the parent directory exists so callers don't need to mkdir
+// themselves, and it applies sensible PRAGMAs unless the user has already
+// passed query parameters.
+func resolveDSN(d dialect, cfg Config) (string, error) {
+	switch d.name {
+	case "sqlite":
+		raw := strings.TrimSpace(cfg.DSN)
+		if raw == "" {
+			raw = strings.TrimSpace(cfg.Path)
+		}
+		if raw == "" {
+			return "", errors.New("sqlite: empty db path (set DB_PATH or DB_DSN)")
+		}
+		// Pull off any pre-existing query string so we can mkdir the parent.
+		path := raw
+		query := ""
+		if idx := strings.Index(raw, "?"); idx >= 0 {
+			path = raw[:idx]
+			query = raw[idx:]
+		}
+		if dir := filepath.Dir(path); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return "", fmt.Errorf("sqlite: create dir %s: %w", dir, err)
+			}
+		}
+		if query == "" {
+			query = "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+		}
+		return path + query, nil
+	case "mysql", "postgres":
+		dsn := strings.TrimSpace(cfg.DSN)
+		if dsn == "" {
+			return "", fmt.Errorf("%s: DB_DSN is required for driver %q", d.name, d.name)
+		}
+		return dsn, nil
+	default:
+		return "", fmt.Errorf("unsupported db driver: %q", d.name)
+	}
+}
+
+// applyPool configures the database/sql connection pool. SQLite gets a single
+// writer connection (the journal mode is WAL but writers still serialise);
+// MySQL/Postgres get pool defaults appropriate for cloud workloads.
+func applyPool(db *sql.DB, d dialect, cfg Config) {
+	switch d.name {
+	case "sqlite":
+		db.SetMaxOpenConns(1)
+		if cfg.MaxOpenConns > 0 {
+			db.SetMaxOpenConns(cfg.MaxOpenConns)
+		}
+		if cfg.MaxIdleConns > 0 {
+			db.SetMaxIdleConns(cfg.MaxIdleConns)
+		}
+		if cfg.ConnMaxLifetime > 0 {
+			db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+		}
+	default:
+		max := cfg.MaxOpenConns
+		if max <= 0 {
+			max = 10
+		}
+		idle := cfg.MaxIdleConns
+		if idle <= 0 {
+			idle = 5
+		}
+		if idle > max {
+			idle = max
+		}
+		lt := cfg.ConnMaxLifetime
+		if lt <= 0 {
+			lt = 30 * time.Minute
+		}
+		db.SetMaxOpenConns(max)
+		db.SetMaxIdleConns(idle)
+		db.SetConnMaxLifetime(lt)
+	}
 }

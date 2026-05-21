@@ -12,6 +12,19 @@
 - [x] **P2** index.html GitHub 連結指向 s12ryt/docker-ai-proxy
 - [x] **P2** 建立 agent/ 目錄 (項目表 / memory / deep_todos)
 
+## 已完成 (雲端 DB 增強 · 2026-05-21)
+
+- [x] **P1** 新增 MySQL / PostgreSQL 雙 driver 支持（純 Go，無 CGO）
+    - `go-sql-driver/mysql v1.8.1`、`jackc/pgx/v5 v5.7.1`（stdlib mode）
+- [x] **P1** `internal/store/dialect.go`：抽象 sqlite / mysql / postgres 三套 schema 與 query rebind
+- [x] **P1** `store.Open(cfg Config)` 重構，保留 `OpenSQLite(path)` 向後相容
+- [x] **P1** `config.Config` 新增 6 欄位：DBDriver / DBDSN / DBMaxOpen / DBMaxIdle / DBConnMaxLife（DBPath 維持）
+- [x] **P1** env / config.json 雙路徑可覆寫（含 `_db_examples` 文件範例區塊）
+- [x] **P1** 連線預檢（10s `PingContext`）、SQLite 自動建父目錄、池預設值
+- [x] **P1** `dialect_test.go` 含 9 + 6 + 3 + 1 + 2 + 1 + 1 個子測試覆蓋 driver alias / rebind / DSN 解析
+- [x] **P1** docker-compose / README / config.example.json 範例與文件更新
+
+
 ## TODO · 待辦 backlog
 
 ### P0 · 阻塞性
@@ -39,6 +52,9 @@
 - [ ] **provider 健康檢查**：失敗計數 + 暫時冷卻（circuit breaker），讓 KeyPicker 跳過壞 key。
 - [ ] **dashboard 顯示 token 統計**（依賴上面 token usage 計數）。
 - [ ] **/v1/embeddings、/v1/completions** 等其他 OpenAI 路由的轉發。
+- [ ] **DB schema migration 工具**：現在三套 schema 是 dialect 字串硬編碼，加欄位要三邊改。可導入 `golang-migrate` 或 `pressly/goose` 統一管理版本。
+- [ ] **DB retention job**：背景定時 `DELETE FROM ai_calls WHERE created_at < NOW() - INTERVAL ?`（雲端 DB 必要）。sqlite 時代靠刪檔，現在切雲端後沒清理機制會無限長大。
+- [ ] **DB 連線健康監控**：把 `db.Stats()`（open/idle/wait_count）暴露到 `/api/runtime`，方便診斷雲端連線池異常。
 
 ### P3 · 體驗與品質
 
@@ -47,3 +63,4 @@
 - [ ] **dashboard.js 切換 provider enable/disable** 的 UI（目前只能改 config.json + 重啟）。
 - [ ] **README 補英文版**（README.en.md）給國際用戶。
 - [ ] **OpenAPI / Swagger** 描述 `/v1/*` 與 `/api/*`。
+- [ ] **read replica / read-write 分流**：高流量場景需 `DB_READ_DSN` 之類設計（讀走 replica）。雲端 DB 才有意義，sqlite 用不到。

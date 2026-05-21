@@ -1,0 +1,153 @@
+package store
+
+import (
+	"fmt"
+	"strings"
+)
+
+// dialect captures driver-specific SQL flavour differences so the rest of the
+// store can stay written against a single canonical query (using `?`
+// placeholders and ANSI identifiers).
+type dialect struct {
+	// name is the driver name returned to callers (sqlite/mysql/postgres).
+	name string
+	// driverName is the registered database/sql driver name to pass to sql.Open.
+	driverName string
+	// schema returns the full CREATE TABLE / CREATE INDEX statements for this
+	// dialect. Each statement is terminated with `;` and may be executed
+	// individually for drivers that don't accept multi-statement scripts.
+	schema []string
+	// rebind transforms a query written with `?` placeholders into the dialect's
+	// native placeholder syntax. For sqlite/mysql this is identity; for
+	// postgres it rewrites to $1, $2, ...
+	rebind func(string) string
+}
+
+func sqliteDialect() dialect {
+	return dialect{
+		name:       "sqlite",
+		driverName: "sqlite",
+		schema: []string{
+			`CREATE TABLE IF NOT EXISTS calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    bytes_in INTEGER NOT NULL DEFAULT 0,
+    bytes_out INTEGER NOT NULL DEFAULT 0,
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    client_ip TEXT,
+    err TEXT
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);`,
+			`CREATE INDEX IF NOT EXISTS idx_calls_provider_ts ON calls(provider, ts);`,
+		},
+		rebind: func(q string) string { return q },
+	}
+}
+
+func mysqlDialect() dialect {
+	return dialect{
+		name:       "mysql",
+		driverName: "mysql",
+		schema: []string{
+			`CREATE TABLE IF NOT EXISTS calls (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    ts BIGINT NOT NULL,
+    provider VARCHAR(128) NOT NULL,
+    model VARCHAR(255) NOT NULL,
+    path VARCHAR(512) NOT NULL,
+    status INT NOT NULL,
+    latency_ms BIGINT NOT NULL,
+    bytes_in BIGINT NOT NULL DEFAULT 0,
+    bytes_out BIGINT NOT NULL DEFAULT 0,
+    tokens_in BIGINT NOT NULL DEFAULT 0,
+    tokens_out BIGINT NOT NULL DEFAULT 0,
+    client_ip VARCHAR(64) NULL,
+    err TEXT NULL,
+    PRIMARY KEY (id),
+    KEY idx_calls_ts (ts),
+    KEY idx_calls_provider_ts (provider, ts)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+		},
+		rebind: func(q string) string { return q },
+	}
+}
+
+func postgresDialect() dialect {
+	return dialect{
+		name:       "postgres",
+		driverName: "pgx",
+		schema: []string{
+			`CREATE TABLE IF NOT EXISTS calls (
+    id BIGSERIAL PRIMARY KEY,
+    ts BIGINT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    latency_ms BIGINT NOT NULL,
+    bytes_in BIGINT NOT NULL DEFAULT 0,
+    bytes_out BIGINT NOT NULL DEFAULT 0,
+    tokens_in BIGINT NOT NULL DEFAULT 0,
+    tokens_out BIGINT NOT NULL DEFAULT 0,
+    client_ip TEXT,
+    err TEXT
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);`,
+			`CREATE INDEX IF NOT EXISTS idx_calls_provider_ts ON calls(provider, ts);`,
+		},
+		rebind: rebindPostgres,
+	}
+}
+
+// rebindPostgres converts `?` placeholders into `$N`, ignoring `?` inside
+// single-quoted strings. Comments are not stripped — our queries are all
+// hand-written and contain none.
+func rebindPostgres(q string) string {
+	var b strings.Builder
+	b.Grow(len(q) + 8)
+	inQuote := false
+	n := 0
+	for i := 0; i < len(q); i++ {
+		c := q[i]
+		switch {
+		case c == '\'':
+			// Handle escaped quote `''` inside a string literal.
+			if inQuote && i+1 < len(q) && q[i+1] == '\'' {
+				b.WriteByte('\'')
+				b.WriteByte('\'')
+				i++
+				continue
+			}
+			inQuote = !inQuote
+			b.WriteByte(c)
+		case c == '?' && !inQuote:
+			n++
+			fmt.Fprintf(&b, "$%d", n)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// resolveDialect chooses a dialect from a driver name (case-insensitive). The
+// empty string and "sqlite3" are normalised to sqlite; "pg" and "postgresql"
+// to postgres; "mariadb" to mysql.
+func resolveDialect(name string) (dialect, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "sqlite", "sqlite3":
+		return sqliteDialect(), nil
+	case "mysql", "mariadb":
+		return mysqlDialect(), nil
+	case "postgres", "postgresql", "pg", "pgx":
+		return postgresDialect(), nil
+	default:
+		return dialect{}, fmt.Errorf("unsupported db driver: %q (want sqlite|mysql|postgres)", name)
+	}
+}

@@ -2,7 +2,20 @@
   "listen": ":8080",
   "admin_token": "change-me-please",
   "access_tokens": ["client-token-1"],
+
+  "db_driver": "sqlite",
   "db_path": "/data/ai-hub.db",
+  "db_dsn": "",
+  "db_max_open_conns": 0,
+  "db_max_idle_conns": 0,
+  "db_conn_max_lifetime": "",
+
+  "_db_examples": {
+    "sqlite": { "db_driver": "sqlite", "db_path": "/data/ai-hub.db" },
+    "mysql":  { "db_driver": "mysql",  "db_dsn": "aihub:secret@tcp(mysql.internal:3306)/aihub?parseTime=true&charset=utf8mb4&loc=UTC" },
+    "postgres": { "db_driver": "postgres", "db_dsn": "postgres://aihub:secret@pg.internal:5432/aihub?sslmode=require" }
+  },
+
   "providers": [
     {
       "name": "openai",

@@ -46,3 +46,71 @@
 - git push 觸發 CI 後到 GitHub Actions 看狀態：https://github.com/s12ryt/docker-ai-proxy/actions
 - GHCR 鏡像：`ghcr.io/s12ryt/docker-ai-proxy:latest`
 - 本機驗證 build：`docker build -t test .`（如果有 Docker）
+
+---
+
+## 2026-05-21 · 增強：雲端 MySQL / PostgreSQL 支持
+
+### 需求
+
+用戶任務：「幫我添加對雲端的MySQL或是PostgreSQL提供變量配置的支持」。
+
+不只是「加 driver」，而是要在 env / config.json 兩條路徑都暴露 driver 與 DSN，並把 SQLite 切換為可選後端，且維持「純 Go、無 CGO」。
+
+### 設計決策
+
+1. **三 driver、純 Go**：
+    - SQLite: `modernc.org/sqlite v1.34.1`（既有）
+    - MySQL: `github.com/go-sql-driver/mysql v1.8.1`
+    - PostgreSQL: `github.com/jackc/pgx/v5 v5.7.1`（用 `stdlib` 子包註冊為 `pgx` driver）
+   全部不需 CGO → distroless 鏡像照樣能用。
+
+2. **新增 6 個配置欄位**（env → JSON → 預設）：
+    - `DB_DRIVER` / `db_driver`：`sqlite`（預設）/ `mysql` / `postgres`，alias 接受 `sqlite3` `mariadb` `postgresql` `pg` `pgx`
+    - `DB_DSN` / `db_dsn`：mysql/pg 必填；sqlite 可選（留空走 `DB_PATH`）
+    - `DB_PATH` / `db_path`：**僅 sqlite 生效**（向後相容）
+    - `DB_MAX_OPEN_CONNS` / `db_max_open_conns`：池上限
+    - `DB_MAX_IDLE_CONNS` / `db_max_idle_conns`：閒置上限
+    - `DB_CONN_MAX_LIFETIME` / `db_conn_max_lifetime`：`time.Duration` 字串（如 `30m`、`1h`）
+
+3. **dialect 抽象**（新檔 `internal/store/dialect.go`）：
+    - `dialect{name, driverName, schema[], rebind}` 三家差異全部塞進這層
+    - `rebindPostgres` 把 `?` 改成 `$N`，但要跳過字串字面值內的 `?`（處理 `''` escape）
+    - sqlite/mysql 的 rebind 是 identity（直接回傳）
+
+4. **`store.Open(cfg Config)` 簽名變更**：
+    - 舊 `Open(path string)` → 新 `Open(cfg Config)` 一刀切，但保留 `OpenSQLite(path)` 包裝給既有 test
+    - 新增 `Driver()` 回傳 dialect 名稱方便 main 印 log
+    - `migrate()` 跑 `dialect.schema` slice（mysql 是單句、sqlite 三句、pg 三句）
+    - `LogCall` / `Summarize` / `RecentCalls` 三個查詢全部包 `s.dialect.rebind(...)`
+
+5. **行為差異補齊**：
+    - `Summarize` 加 `COALESCE(SUM(...), 0)`，因為 mysql/pg 對「無 row」會回 NULL，sqlite 也補上以保持一致
+    - `Open` 末段加 10s `PingContext`：雲端 DB 連線錯誤（DNS / SSL / 防火牆）提前曝露，比第一筆 LogCall 才炸要友善
+
+6. **連線池預設**：
+    - SQLite：`MaxOpenConns=1`（modernc.org/sqlite 多執行緒寫衝突會 SQLITE_BUSY，單連線最穩）
+    - MySQL/PG：`MaxOpen=10`、`MaxIdle=5`、`Lifetime=30m`（雲端 DB 多半有閒置連線回收）
+    - 全部可被 env / JSON 覆寫
+
+### 踩坑與易混點
+
+1. **`pgx/v5/stdlib` 的 driver 名是 `pgx`**，不是 `postgres` 或 `pq`。`resolveDialect` 把 `postgres/postgresql/pg/pgx` 都對到同一個 dialect 但 `driverName="pgx"`。
+2. **mysql DSN 必須加 `parseTime=true`**：不然 `created_at` 讀出來是 `[]byte` 不是 `time.Time`。已寫進 README 與 `_db_examples`。
+3. **`io.Copy` 與 SSE 的關係已經修過**，但雲端 DB 換 driver 不影響流式行為——LogCall 是 stream 結束後才呼叫，不在熱路徑上。
+4. **`resolveDSN` 對 sqlite 仍自動 `os.MkdirAll(filepath.Dir(path))`**：把這層從 `cmd/ai-hub/main.go` 搬進 store，main 因此乾淨許多。
+5. **Reload() 同步新欄位**：6 個 DB 欄位都要在 `Reload()` 與 `Snapshot()` 內複製，漏一個會造成「改 env / config 後沒生效」。
+6. **`go.sum` 仍不入庫**：CI 的 `GOFLAGS=-mod=mod` + `go mod tidy` 自動拉三個新依賴。代價：build 不可離線。可接受。
+
+### 已知不修的限制（雲端 DB 部分）
+
+- **schema 是 dialect-specific 字串**，沒做 migrate 版本管理。增欄位時三份 schema 都要改。短期可接受，長期可換 `golang-migrate`。
+- **沒做 retention job**：sqlite 時代靠手動刪資料庫檔；雲端 DB 必須加 `DELETE FROM ai_calls WHERE created_at < NOW() - INTERVAL ...` 排程。已寫入 deep_todos。
+- **沒做 read replica 分流**：高流量場景可能需要 `db.SetReadOnlyDSN()` 之類設計。寫入 deep_todos P3。
+- **MySQL `BIGINT AUTO_INCREMENT` vs sqlite `INTEGER PRIMARY KEY`**：跨 dialect 主鍵型別不同，dashboard 端 JSON 序列化沒問題（都走 `int64`）。注意未來如果加跨 DB migration 工具要留意。
+
+### 操作備忘
+
+- `config.example.json` 加了 `_db_examples` 區塊（底線開頭，被 `encoding/json` 解出但實際不映射到任何欄位 → 純文件用）
+- README 新增「☁️ 切換到雲端 MySQL / PostgreSQL」一節，給兩個 docker run 範例
+- docker-compose.yml 加註釋 env 範例，使用者只要解註釋就能切換

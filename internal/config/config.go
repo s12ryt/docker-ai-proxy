@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,11 @@ type Config struct {
 	AdminToken    string     `json:"admin_token"`
 	AccessTokens  []string   `json:"access_tokens"`
 	DBPath        string     `json:"db_path"`
+	DBDriver      string     `json:"db_driver"`
+	DBDSN         string     `json:"db_dsn"`
+	DBMaxOpen     int        `json:"db_max_open_conns"`
+	DBMaxIdle     int        `json:"db_max_idle_conns"`
+	DBConnMaxLife string     `json:"db_conn_max_lifetime"`
 	Providers     []Provider `json:"providers"`
 	EnableMetrics bool       `json:"enable_metrics"`
 	StartedAt     time.Time  `json:"-"`
@@ -63,6 +69,12 @@ func Reload() {
 	current.Listen = c.Listen
 	current.AdminToken = c.AdminToken
 	current.AccessTokens = c.AccessTokens
+	current.DBPath = c.DBPath
+	current.DBDriver = c.DBDriver
+	current.DBDSN = c.DBDSN
+	current.DBMaxOpen = c.DBMaxOpen
+	current.DBMaxIdle = c.DBMaxIdle
+	current.DBConnMaxLife = c.DBConnMaxLife
 	current.Providers = c.Providers
 	current.EnableMetrics = c.EnableMetrics
 }
@@ -134,6 +146,11 @@ func load() *Config {
 		Listen:        envOr("LISTEN", ":8080"),
 		AdminToken:    envOr("ADMIN_TOKEN", "change-me-admin"),
 		DBPath:        envOr("DB_PATH", "data/ai-hub.db"),
+		DBDriver:      envOr("DB_DRIVER", "sqlite"),
+		DBDSN:         os.Getenv("DB_DSN"),
+		DBMaxOpen:     envInt("DB_MAX_OPEN_CONNS", 0),
+		DBMaxIdle:     envInt("DB_MAX_IDLE_CONNS", 0),
+		DBConnMaxLife: os.Getenv("DB_CONN_MAX_LIFETIME"),
 		EnableMetrics: envOr("ENABLE_METRICS", "1") == "1",
 		StartedAt:     time.Now(),
 	}
@@ -161,6 +178,21 @@ func load() *Config {
 			}
 			if fileCfg.DBPath != "" {
 				c.DBPath = fileCfg.DBPath
+			}
+			if fileCfg.DBDriver != "" {
+				c.DBDriver = fileCfg.DBDriver
+			}
+			if fileCfg.DBDSN != "" {
+				c.DBDSN = fileCfg.DBDSN
+			}
+			if fileCfg.DBMaxOpen != 0 {
+				c.DBMaxOpen = fileCfg.DBMaxOpen
+			}
+			if fileCfg.DBMaxIdle != 0 {
+				c.DBMaxIdle = fileCfg.DBMaxIdle
+			}
+			if fileCfg.DBConnMaxLife != "" {
+				c.DBConnMaxLife = fileCfg.DBConnMaxLife
 			}
 			if len(fileCfg.AccessTokens) > 0 {
 				c.AccessTokens = fileCfg.AccessTokens
@@ -191,6 +223,22 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envInt reads a positive integer from the named environment variable. Missing
+// or unparseable values return fallback so callers can apply driver-specific
+// defaults afterwards.
+func envInt(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		log.Printf("[config] %s=%q invalid, ignored", key, v)
+		return fallback
+	}
+	return n
 }
 
 func defaultProviders() []Provider {
