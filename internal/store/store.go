@@ -32,9 +32,12 @@ type Store struct {
 // accepted), "mysql", "postgres". DSN is the driver-specific connection
 // string. For SQLite, DSN is the file path (Path is accepted as a legacy
 // alias). For MySQL the DSN follows go-sql-driver/mysql's format, e.g.
-//   user:pass@tcp(host:3306)/dbname?parseTime=true&charset=utf8mb4&loc=UTC
+//
+//	user:pass@tcp(host:3306)/dbname?parseTime=true&charset=utf8mb4&loc=UTC
+//
 // For PostgreSQL it follows pgx's URL form, e.g.
-//   postgres://user:pass@host:5432/dbname?sslmode=require
+//
+//	postgres://user:pass@host:5432/dbname?sslmode=require
 //
 // MaxOpenConns / MaxIdleConns / ConnMaxLifetime tune the connection pool. The
 // defaults are conservative and safe for embedded SQLite as well as cloud
