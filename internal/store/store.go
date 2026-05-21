@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"  // mysql driver
-	_ "github.com/jackc/pgx/v5/stdlib"  // pgx driver (database/sql adapter)
-	_ "modernc.org/sqlite"               // pure-go sqlite driver
+	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "modernc.org/sqlite"
 )
 
 // Store wraps a SQL database used for request logs and aggregated metrics. It
@@ -67,8 +67,7 @@ type CallRecord struct {
 }
 
 // Open initialises the store and applies the schema. For backwards
-// compatibility a bare file path is still accepted as the first argument via
-// OpenSQLite.
+// compatibility a bare file path is still accepted via OpenSQLite.
 func Open(cfg Config) (*Store, error) {
 	d, err := resolveDialect(cfg.Driver)
 	if err != nil {
