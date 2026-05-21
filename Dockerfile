@@ -24,6 +24,11 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     ls -lh /out/ai-hub
 
 # ---------- runtime stage ----------
+# Prepare a /data directory owned by the nonroot user (uid/gid 65532 in distroless).
+# distroless has no shell so we do the chown in an intermediate alpine stage.
+FROM alpine:3.20 AS rootfs
+RUN mkdir -p /rootfs/data && chown -R 65532:65532 /rootfs/data
+
 FROM gcr.io/distroless/static-debian12:nonroot
 
 LABEL org.opencontainers.image.title="AI Hub" \
@@ -33,6 +38,7 @@ LABEL org.opencontainers.image.title="AI Hub" \
 
 WORKDIR /app
 COPY --from=builder /out/ai-hub /app/ai-hub
+COPY --from=rootfs --chown=65532:65532 /rootfs/data /data
 
 ENV LISTEN=":8080" \
     DB_PATH="/data/ai-hub.db" \

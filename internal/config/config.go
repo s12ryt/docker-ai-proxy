@@ -51,6 +51,13 @@ func Get() *Config {
 // Reload re-reads configuration from disk (if a config file is present).
 func Reload() {
 	c := load()
+	if current == nil {
+		current = c
+		return
+	}
+	if current.mu == nil {
+		current.mu = new(sync.RWMutex)
+	}
 	current.mu.Lock()
 	defer current.mu.Unlock()
 	current.Listen = c.Listen

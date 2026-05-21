@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"io/fs"
+	"log"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -156,8 +157,49 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 
 func (s *Server) withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
+		start := time.Now()
+		lrw := &loggingResponseWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(lrw, r)
+		// Skip noisy static asset / health probes from access log.
+		if r.URL.Path == "/healthz" ||
+			strings.HasPrefix(r.URL.Path, "/style.css") ||
+			strings.HasPrefix(r.URL.Path, "/app.js") ||
+			strings.HasPrefix(r.URL.Path, "/dashboard.js") {
+			return
+		}
+		log.Printf("%s %s %d %s", r.Method, r.URL.Path, lrw.status, time.Since(start).Round(time.Millisecond))
 	})
+}
+
+// loggingResponseWriter captures the status code so withLogging can report it.
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (l *loggingResponseWriter) WriteHeader(code int) {
+	if l.wroteHeader {
+		return
+	}
+	l.status = code
+	l.wroteHeader = true
+	l.ResponseWriter.WriteHeader(code)
+}
+
+func (l *loggingResponseWriter) Write(b []byte) (int, error) {
+	if !l.wroteHeader {
+		l.wroteHeader = true
+	}
+	return l.ResponseWriter.Write(b)
+}
+
+// Flush forwards Flush() so the proxy's streaming path keeps working
+// when the inner ResponseWriter is wrapped by loggingResponseWriter.
+func (l *loggingResponseWriter) Flush() {
+	if f, ok := l.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func (s *Server) withRecover(next http.Handler) http.Handler {

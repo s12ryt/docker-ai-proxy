@@ -142,11 +142,39 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 	rec.Status = resp.StatusCode
 
-	n, copyErr := io.Copy(w, resp.Body)
-	rec.BytesOut = n
-	if copyErr != nil && !errors.Is(copyErr, context.Canceled) {
-		rec.ErrMessage = copyErr.Error()
+	// Stream-aware copy: flush after each chunk so SSE/NDJSON reaches
+	// the client without buffering. Falls back to plain io.Copy when
+	// the ResponseWriter does not expose http.Flusher.
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	var n int64
+	for {
+		nr, er := resp.Body.Read(buf)
+		if nr > 0 {
+			nw, ew := w.Write(buf[:nr])
+			n += int64(nw)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			if ew != nil {
+				if !errors.Is(ew, context.Canceled) {
+					rec.ErrMessage = ew.Error()
+				}
+				break
+			}
+			if nr != nw {
+				rec.ErrMessage = io.ErrShortWrite.Error()
+				break
+			}
+		}
+		if er != nil {
+			if er != io.EOF && !errors.Is(er, context.Canceled) {
+				rec.ErrMessage = er.Error()
+			}
+			break
+		}
 	}
+	rec.BytesOut = n
 }
 
 // ServeModels lists all enabled models across providers in OpenAI format.
