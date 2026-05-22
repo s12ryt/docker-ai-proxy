@@ -163,6 +163,13 @@ func fillDefaultsForOpenAIResponse(ir *protocol.ChatResponse, requestModel strin
 	if ir.Model == "" {
 		ir.Model = requestModel
 	}
+	for i := range ir.Choices {
+		// NativeFinish preserves vendor-specific stop reasons inside the IR
+		// (e.g. Anthropic "end_turn", Gemini "STOP"). When translating
+		// back to OpenAI format we must emit OpenAI finish_reason values, so
+		// force EncodeOpenAIResponse to use the normalised StopReason field.
+		ir.Choices[i].NativeFinish = ""
+	}
 }
 
 // randomID returns a short hex-ish identifier suitable for synthetic

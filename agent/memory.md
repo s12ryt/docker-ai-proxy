@@ -315,3 +315,17 @@
 - **Anthropic/Gemini 串流 SSE 翻譯**:目前 stream=true 直接 501。Stage 4 會做事件層級雙向翻譯(`message_delta` <-> `content.delta`)。
 - **token usage 計數**:Anthropic 回 `input_tokens`/`output_tokens`,Gemini 回 `promptTokenCount`/`candidatesTokenCount`,目前 `translateChatResponse` 已經透過 IR 映射到 `Usage`,所以 `chat.completion` 回應內 `usage` 欄位是準的。但 `store.LogCall` 內 `BytesIn/BytesOut` 還沒換成 token,deep_todos P2 持續觀察。
 - **deep_todos.md「Anthropic 真支援」項描述需更新**:非串流已 OK,只剩串流。可改寫為「串流 SSE 反向翻譯」。
+
+---
+
+## 2026-05-22 · Stage 2 CI 偵錯補記
+
+- commit `8c3802c` 推上 main 後，CI `Run tests with race detector & coverage` 失敗，但 GitHub annotations 只有泛用 exit code 1，logs API 未授權無法抓詳細輸出。
+- 第一次靜態推測：新增 fake upstream e2e test 在 handler goroutine 寫 captured vars、主 goroutine 讀斷言，可能被 `go test -race` 判 race；commit `5cd1da7` 對 Anthropic/Gemini 兩個測試加 `sync.Mutex` 保護 captured path/header/body 後再推，但 CI 仍失敗。
+- 後續改用 portable Go 解法：下載 Go 1.22.12 到 `C:\Users\yoyo2\AppData\Local\Temp\opencode\go`，不污染專案；Windows 無 CGO toolchain 所以不能跑 `-race`，但可跑一般 `go test`。
+- 本機重現 `go test -run TestServeChatCompletions_ -count=1 -v ./internal/proxy`，找到真正失敗：翻譯回 OpenAI envelope 時 `finish_reason` 仍是 vendor raw value：Anthropic `end_turn`、Gemini `STOP`，測試預期 OpenAI 標準 `stop`。
+- 修復點：`internal/proxy/translate.go` 的 `fillDefaultsForOpenAIResponse` 會清空每個 choice 的 `NativeFinish`，讓 `protocol.EncodeOpenAIResponse` 依正常化後的 `StopReason` 輸出 OpenAI `finish_reason`。保留 protocol 層 IR 對 raw `NativeFinish` 的 fidelity，不改 Stage 1 純轉換函數語意。
+- 驗證：
+  - `go test -run TestServeChatCompletions_ -count=1 -v ./internal/proxy` 通過。
+  - `go test -count=1 ./...` 全套通過。
+- 注意：CI Linux runner 能跑 `-race`；Windows portable Go 本機只能覆蓋非 race assertion/build。若 CI 再紅，再依 CI 查下一個 race 或測試問題。
