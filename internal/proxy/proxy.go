@@ -17,6 +17,15 @@ import (
 	"github.com/s12ryt/docker-ai-proxy/internal/store"
 )
 
+// maxRequestBytes caps the incoming chat-completions payload. Generous enough
+// for image_url / base64-encoded multimodal inputs while still keeping a hard
+// ceiling against runaway uploads.
+const maxRequestBytes = 32 << 20 // 32 MiB
+
+// logCallTimeout bounds the background persistence of a CallRecord so a slow
+// or stuck database cannot leak goroutines after the request has finished.
+const logCallTimeout = 5 * time.Second
+
 // Proxy forwards OpenAI-compatible requests to the appropriate upstream provider.
 type Proxy struct {
 	cfg    *config.Config
@@ -33,10 +42,16 @@ func New(cfg *config.Config, st *store.Store) *Proxy {
 		client: &http.Client{
 			Timeout: 0, // controlled per-request via context
 			Transport: &http.Transport{
-				MaxIdleConns:        200,
-				MaxIdleConnsPerHost: 32,
-				IdleConnTimeout:     90 * time.Second,
-				ForceAttemptHTTP2:   true,
+				MaxIdleConns:          200,
+				MaxIdleConnsPerHost:   32,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				// ResponseHeaderTimeout guards against an upstream that
+				// accepts the connection but never returns headers; the
+				// per-request context still bounds the full body.
+				ResponseHeaderTimeout: 60 * time.Second,
+				ForceAttemptHTTP2:     true,
 			},
 		},
 	}
@@ -49,7 +64,7 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
 		return
@@ -76,7 +91,12 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Replace model name with provider-native form before forwarding.
 	payload["model"] = model
-	outBody, _ := json.Marshal(payload)
+	outBody, err := json.Marshal(payload)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "marshal payload: "+err.Error())
+		return
+	}
+	stream, _ := payload["stream"].(bool)
 
 	rec := store.CallRecord{
 		Timestamp: time.Now(),
@@ -90,9 +110,16 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		rec.LatencyMS = time.Since(start).Milliseconds()
-		if p.store != nil {
-			_ = p.store.LogCall(context.Background(), rec)
+		if p.store == nil {
+			return
 		}
+		// Use an independent context so the log write survives the request
+		// being cancelled (client disconnect) and any server shutdown that
+		// is currently draining active handlers. A short timeout keeps a
+		// stuck DB from blocking the response.
+		ctx, cancel := context.WithTimeout(context.Background(), logCallTimeout)
+		defer cancel()
+		_ = p.store.LogCall(ctx, rec)
 	}()
 
 	upstreamURL, headers, err := buildUpstreamRequest(provider, "/v1/chat/completions", p.picker.Pick(provider))
@@ -139,6 +166,20 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("X-AI-Hub-Provider", provider.Name)
+
+	// Detect SSE either from the upstream Content-Type or the client's
+	// stream:true flag, and apply the anti-buffering headers that nginx /
+	// Cloudflare / common reverse proxies look for. These must be set
+	// before WriteHeader because the http.ResponseWriter freezes headers
+	// on first write.
+	if stream || isEventStream(resp.Header.Get("Content-Type")) {
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
+		w.Header().Set("X-Accel-Buffering", "no")
+		// Replace any Content-Length the upstream might have sent — SSE
+		// responses are length-unknown by definition.
+		w.Header().Del("Content-Length")
+	}
+
 	w.WriteHeader(resp.StatusCode)
 	rec.Status = resp.StatusCode
 
@@ -243,21 +284,72 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 	})
 }
 
+// clientIP picks the most plausible originating client address. Order:
+//  1. The first non-empty hop in X-Forwarded-For (the closest the standard
+//     gets to "the original client" — later hops are intermediate proxies).
+//  2. X-Real-IP (often set by nginx ingress).
+//  3. The TCP RemoteAddr, with the port stripped.
+//
+// IPv6 addresses inside any of the above are normalised by stripping a
+// trailing `:port` and surrounding brackets where present.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i > 0 {
-			return strings.TrimSpace(xff[:i])
+		for _, part := range strings.Split(xff, ",") {
+			candidate := strings.TrimSpace(part)
+			if candidate == "" {
+				continue
+			}
+			return normaliseIP(candidate)
 		}
-		return strings.TrimSpace(xff)
 	}
-	if rip := r.Header.Get("X-Real-IP"); rip != "" {
-		return rip
+	if rip := strings.TrimSpace(r.Header.Get("X-Real-IP")); rip != "" {
+		return normaliseIP(rip)
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// normaliseIP turns "[::1]:8080" / "1.2.3.4:5678" / "::1" / "1.2.3.4"
+// into a bare IP literal. Pure IPv6 without brackets is left untouched.
+func normaliseIP(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	// Bracketed form: [ipv6] or [ipv6]:port
+	if strings.HasPrefix(s, "[") {
+		if host, _, err := net.SplitHostPort(s); err == nil {
+			return host
+		}
+		// Bracketed but no port — strip the brackets.
+		if end := strings.LastIndexByte(s, ']'); end > 0 {
+			return s[1:end]
+		}
+		return s
+	}
+	// Already a bare IPv6 (multiple colons, no brackets) — leave alone.
+	if strings.Count(s, ":") >= 2 {
+		return s
+	}
+	// IPv4 or hostname, possibly with a :port suffix.
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		return host
+	}
+	return s
+}
+
+func isEventStream(ct string) bool {
+	if ct == "" {
+		return false
+	}
+	// e.g. "text/event-stream; charset=utf-8"
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(ct), "text/event-stream")
 }
 
 var hopByHop = map[string]struct{}{

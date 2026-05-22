@@ -28,6 +28,23 @@
 - [x] **P1** `dialect_test.go` 含 9 + 6 + 3 + 1 + 2 + 1 + 1 個子測試覆蓋 driver alias / rebind / DSN 解析
 - [x] **P1** docker-compose / README / config.example.json 範例與文件更新
 
+## 已完成 (第二輪 bug 排查 · 2026-05-22)
+
+逐檔過完整 codebase，找出 18 個潛在 bug，修了 14 個（剩下 2 個 P2 + 1 個 P3 評估後不修）。詳見 memory.md 對應段落。
+
+- [x] **P0** Bug 1+7 `config.Snapshot()` 改為真深拷貝（slice + 每個 Provider 內的 APIKeys/Models）
+- [x] **P0** Bug 5 `requireAdmin` 改用 snapshot 並補空 token 防線
+- [x] **P0** Bug 6 `handleRuntime` / `healthz` 改用 snapshot
+- [x] **P0** Bug 4 `withRecover` 完整化：debug.Stack() 寫 log、特判 ErrAbortHandler、依 wroteHeader 決定是否回 500
+- [x] **P0** Bug 2+11 proxy LogCall 改用獨立 `context.WithTimeout(Background, 5s)`，client cancel / shutdown 不影響日誌
+- [x] **P1** Bug 3+17 SSE：複製 header 後設 Cache-Control: no-cache, no-transform / X-Accel-Buffering: no、刪 Content-Length；ShortWrite 路徑審視 + 註釋
+- [x] **P1** Bug 8 `clientIP` 多 hop XFF Split + 共用 `normaliseIP` 處理 IPv4/IPv6 port
+- [x] **P1** Bug 10 `json.Marshal(payload)` err 不再吞，改回 400
+- [x] **P1** Bug 13 http.Client transport 補 TLSHandshakeTimeout / ExpectContinueTimeout / ResponseHeaderTimeout
+- [x] **P1** Bug 15 body 上限 `maxRequestBytes` 8MB → 32MB（為 multimodal base64 預留）
+- [x] **P1** Bug 9 KeyPicker 改為 per-provider cursor（map[string]*uint64 + RWMutex），新增 independence 測試
+- [x] **P1** Bug 14 移除 `store.Store.mu` 全局 Mutex（SQLite MaxOpenConns=1 / 雲端 driver 自帶序列化）
+
 
 ## TODO · 待辦 backlog
 
@@ -59,6 +76,8 @@
 - [ ] **DB schema migration 工具**：現在三套 schema 是 dialect 字串硬編碼，加欄位要三邊改。可導入 `golang-migrate` 或 `pressly/goose` 統一管理版本。
 - [ ] **DB retention job**：背景定時 `DELETE FROM ai_calls WHERE created_at < NOW() - INTERVAL ?`（雲端 DB 必要）。sqlite 時代靠刪檔，現在切雲端後沒清理機制會無限長大。
 - [ ] **DB 連線健康監控**：把 `db.Stats()`（open/idle/wait_count）暴露到 `/api/runtime`，方便診斷雲端連線池異常。
+- [ ] **（觀察中）Bug 16 · `rebindPostgres` 註釋處理**：目前 query 全是手寫硬編無註釋，未來引入 query builder 時再補 `--` / `/* */` 略過邏輯。
+- [ ] **（觀察中）Bug 12 · loggingResponseWriter 實作 `io.ReaderFrom`**：當前 proxy 路徑不走 sendfile fast path 沒影響；若未來改用 `io.Copy(w, src)` 模式且需 zero-copy，需補。
 
 ### P3 · 體驗與品質
 
@@ -68,3 +87,4 @@
 - [ ] **README 補英文版**（README.en.md）給國際用戶。
 - [ ] **OpenAPI / Swagger** 描述 `/v1/*` 與 `/api/*`。
 - [ ] **read replica / read-write 分流**：高流量場景需 `DB_READ_DSN` 之類設計（讀走 replica）。雲端 DB 才有意義，sqlite 用不到。
+- [ ] **（觀察中）Bug 18 · `main.go -version` flag 大小寫不敏感**：影響微小，需要時補 `strings.ToLower`。

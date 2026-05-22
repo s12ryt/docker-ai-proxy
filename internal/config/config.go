@@ -83,7 +83,10 @@ func Reload() {
 	current.EnableMetrics = c.EnableMetrics
 }
 
-// Snapshot returns a deep-ish copy safe for read-only use.
+// Snapshot returns a deep copy safe for concurrent read-only use. Every
+// nested slice (Providers + their APIKeys/Models) is duplicated so callers
+// can read fields without any further synchronisation even while Reload()
+// mutates the underlying config.
 func (c *Config) Snapshot() Config {
 	if c.mu != nil {
 		c.mu.RLock()
@@ -91,8 +94,18 @@ func (c *Config) Snapshot() Config {
 	}
 	out := *c
 	out.mu = nil
-	out.Providers = append([]Provider(nil), c.Providers...)
 	out.AccessTokens = append([]string(nil), c.AccessTokens...)
+	if len(c.Providers) > 0 {
+		out.Providers = make([]Provider, len(c.Providers))
+		for i, p := range c.Providers {
+			cp := p
+			cp.APIKeys = append([]string(nil), p.APIKeys...)
+			cp.Models = append([]string(nil), p.Models...)
+			out.Providers[i] = cp
+		}
+	} else {
+		out.Providers = nil
+	}
 	return out
 }
 

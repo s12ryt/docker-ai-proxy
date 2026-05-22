@@ -115,3 +115,91 @@
 - `config.example.json` 加了 `_db_examples` 區塊（底線開頭，被 `encoding/json` 解出但實際不映射到任何欄位 → 純文件用）
 - README 新增「☁️ 切換到雲端 MySQL / PostgreSQL」一節，給兩個 docker run 範例
 - docker-compose.yml 加註釋 env 範例，使用者只要解註釋就能切換
+
+---
+
+## 2026-05-22 · 第二輪 bug 排查 / 加固
+
+### 範圍
+
+用戶請求：「請你幫我排查還有無潛在bug」→「請你開始進行修復工作」。
+
+逐檔過 `cmd/ai-hub`、`internal/config`、`internal/proxy`、`internal/providers`、`internal/server`、`internal/store`，列出 18 個潛在問題，依 P0–P3 分級。
+本輪修了其中 14 個（P0/P1/P2 中與正確性、並發、resource 有關的），P3 與 1 個 P2 評估後不修並記錄理由。
+
+### 修復清單（依檔案）
+
+#### `internal/config/config.go`
+- **Bug 1+7 · `Snapshot()` 真深拷貝**：之前 `out := *c` 是淺拷貝，slice header 共用底層陣列，外部讀 + Reload 並發改寫會 race。
+  - 加 RLock；`AccessTokens` 拷貝；`Providers` 整 slice 重建，每個 Provider 的 `APIKeys` / `Models` 都 `append([]string(nil), ...)`。
+  - 保留 `mu = nil` 在快照上（snapshot 是值類型，不需鎖）。
+
+#### `internal/server/server.go`
+- **Bug 5 · `requireAdmin` 用 snapshot**：之前直讀 `s.cfg.AdminToken`，現在 `snap := s.cfg.Snapshot()` 後比較 `snap.AdminToken`。
+  - 多一道 `snap.AdminToken == ""` 防空 token（避免空 token 被當合法）。
+- **Bug 6 · `handleRuntime` / `healthz` 用 snapshot**：`StartedAt`、`len(Providers)` 等改為從 snap 讀。
+- **Bug 4 · `withRecover` 完整化**：
+  - import 補 `runtime/debug`。
+  - panic 時：先處理 `http.ErrAbortHandler` 交給上層；其他 panic 透過 `log.Printf("[panic] %s %s: %v\n%s", method, path, v, debug.Stack())` 寫完整 stack。
+  - 檢查 `*loggingResponseWriter.wroteHeader`，若未寫才輸出 `Content-Type: application/json` + 500 + `{error:{message,type:"ai_hub_panic",code:500}}`。
+  - 寫 header 之前就不能再蓋的設計避免「在 stream 中 panic 強寫 500」破壞已下發的 SSE。
+
+#### `internal/proxy/proxy.go`
+- **Bug 2+11 · LogCall 獨立 context**：原本 `defer s.store.LogCall(context.Background(), rec)` 雖然脫離 r.Context()，但沒 timeout。
+  - 新增 `const logCallTimeout = 5 * time.Second`；defer 內 `ctx, cancel := context.WithTimeout(context.Background(), logCallTimeout); defer cancel()`；`LogCall(ctx, rec)`。
+  - 解決：client cancel 不影響日誌、server shutdown 時也最多卡 5s。
+- **Bug 3 · 流式 ShortWrite 錯誤路徑**：審視確認 `nw != nr` 後 `rec.ErrMessage = io.ErrShortWrite.Error()` 並 `break` 邏輯本身正確；補了註釋讓未來不被「優化」。
+- **Bug 17 · SSE headers**：
+  - 提前讀 `stream, _ := payload["stream"].(bool)`（在 outBody marshal 前）。
+  - 在複製 upstream header 後、`WriteHeader` 前：若 `stream || isEventStream(resp.Header.Get("Content-Type"))`，設 `Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no`，並刪 `Content-Length`（SSE 不適用）。
+  - 新增 helper `isEventStream(ct string) bool`，能解析 `text/event-stream; charset=utf-8` 之類帶參數。
+  - 用途：nginx / cloudflare 反代預設會緩衝 text/event-stream，這兩個 header 是業界標準關閉緩衝的開關。
+- **Bug 8 · `clientIP` 多 hop + IPv6**：
+  - XFF 改用 `strings.Split(xff, ",")` 走第一個 trim 後非空項（之前 `IndexByte(',')` 對 `", 1.2.3.4"` 開頭逗號會回空字串）。
+  - X-Real-IP 也走 `normaliseIP()`。
+  - 新增 `normaliseIP(s string) string`：處理 `[ipv6]:port → ipv6`、`[ipv6] → ipv6`、裸 IPv6 不動、`1.2.3.4:port → 1.2.3.4` 四種情況。
+- **Bug 10 · `json.Marshal(payload)` 不再吞 err**：改為 `outBody, err := json.Marshal(payload); if err != nil { writeJSONError(w, 400, ...); return }`。
+- **Bug 13 · http.Client transport timeouts**：補 `TLSHandshakeTimeout: 10s`、`ExpectContinueTimeout: 1s`、`ResponseHeaderTimeout: 60s`。註釋說明「per-request 全長仍由 `context.WithTimeout(r.Context(), TimeoutSec)` 控」。
+  - 避免「TLS 握手 hang 住吃連線」與「上游不回 header 但 keep-alive 不斷」這類資源洩漏。
+- **Bug 15 · body 上限 8MB → 32MB**：`const maxRequestBytes = 32 << 20`；註釋說明 multimodal (vision) base64 圖片很容易破 8MB。
+
+#### `internal/providers/keys.go`
+- **Bug 9 · KeyPicker per-provider cursor**：之前 `cursor uint64` 全局共用 → openai 抽 1 把 cursor++，gemini 接下來抽會跳過第一個 key。
+  - 重寫為 `KeyPicker{ mu sync.RWMutex; cursors map[string]*uint64 }`。
+  - `Pick`：len==0 → ""; len==1 → APIKeys[0]; 其他走 `cursorFor(p.Name)` 拿 `*uint64`，再 `atomic.AddUint64(cur, 1) - 1` mod len(keys)。
+  - `cursorFor` 用 RLock 快路徑（map 已存在）+ Lock 內 double-check 創建，hot path 多數時候只是 RLock。
+- 測試：新增 `TestKeyPicker_PerProviderIndependence` 驗證 openai 敲 5 次後 gemini 第一次仍拿第一個 key。原 `TestKeyPicker_RoundRobin` 給 Provider 補 `Name: "test"` 以套用 map key 機制。
+
+#### `internal/store/store.go`
+- **Bug 14 · 移除全局 Mutex**：原本 `LogCall` 內 `s.mu.Lock()/Unlock()` 把所有 DB 寫入序列化。
+  - 評估：SQLite 走 `MaxOpenConns=1` 已自動序列化；MySQL/PG 的 driver 本身就是 thread-safe（內部 connection pool 各自鎖）。app-level mutex 對雲端 DB 是純粹的瓶頸。
+  - 動作：刪 `Store.mu` 欄位、刪 import `"sync"`、刪 LogCall 內鎖呼叫。doc comment 寫清楚為何不需要。
+
+### 未修項目與理由
+
+- **Bug 12 (P2) loggingResponseWriter 沒實作 `io.ReaderFrom`**：原本擔心 `io.Copy(w, r)` 走 sendfile fast path 會失效。實際路徑：proxy 用手寫 32KB read/write 迴圈，server 沒有走 `io.Copy(loggingW, ...)` 直接寫檔，sendfile fast path 本來就不會觸發。**不修**。
+- **Bug 16 (P2) `rebindPostgres` 沒處理 `--` / `/* */` 註釋**：目前 schema 與 query 都是手寫硬編字串，沒有註釋。將來如果引入 query builder 才需要補。**不修**，留 deep_todos 觀察。
+- **Bug 18 (P3) `main.go -version` flag 沒 `strings.ToLower`**：用戶輸入大小寫敏感無大影響。**不動**。
+
+### 重點設計決策（避免下次回頭推翻）
+
+1. **Snapshot 是值類型回傳**：呼叫端拿到 `Config` 值，不再持有指針 → 自動避免「拿到指針後底層被 Reload 改」。所有 handler 改成 `snap := s.cfg.Snapshot()`，**禁止直接 `s.cfg.AdminToken` 之類**。
+2. **`http.ErrAbortHandler` 不算 panic**：標準庫用它讓 handler 主動放棄，必須往上拋給 net/http 內部處理。withRecover 要特判，否則會誤吞。
+3. **SSE 三件套**：`Content-Type: text/event-stream`（upstream 帶來，原樣轉發）、`Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no` + 刪 Content-Length。漏一項在某些反代下就會壞。
+4. **per-provider KeyPicker 必須鎖**：map 不是 thread-safe；用 sync.RWMutex 而不是 sync.Map 因為 hot path 只是讀 `*uint64`，原子操作不需要 sync.Map 的內部複雜性。
+5. **`LogCall` 的 timeout 5s 是熱抉擇**：太短會掉日誌（雲端 DB tail latency 通常 100ms–2s），太長會卡 shutdown。5s 是大多數 cloud DB SLA 內 + shutdown 也能接受的點。
+6. **`maxRequestBytes = 32MB`**：vision 模型 base64 一張 1080p PNG 約 5–8MB，多輪對話 + 多圖很容易破 8MB。32MB 是 Anthropic/OpenAI 實際接受上限附近。再大要走檔案上傳介面。
+
+### 測試覆蓋預期
+
+本機沒 Go，全靠 CI：
+- `keys_test.go` 新增 `TestKeyPicker_PerProviderIndependence`；舊 `TestKeyPicker_RoundRobin` 補 `Name: "test"`。
+- 其他既有測試應該全綠：snapshot 不改 API、SSE header 變更只影響 stream:true 路徑（測試裡 stream:false）、http.Client transport 變更不影響 httptest local 路徑、LogCall 移鎖只是內部變更、clientIP 修法只強化既有行為。
+
+### 操作備忘
+
+修完之後請：
+1. `git status` 確認改了 6 個檔（config.go / server.go / proxy.go / keys.go / keys_test.go / store.go）。
+2. 寫 commit：`fix: harden concurrency, SSE headers, client timeouts, per-provider key rotation`。
+3. push 觸發 CI；到 GitHub Actions 看 `ci.yml` 結果。
+4. 若 CI 失敗多半是 `gofmt -l .` 抓到 tab/space 不一致，本機沒 Go 沒辦法預跑，靠 CI 回報後修。

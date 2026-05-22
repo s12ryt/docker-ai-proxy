@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -20,10 +19,15 @@ import (
 // supports SQLite (default, file-based, pure-go via modernc.org/sqlite), MySQL
 // (github.com/go-sql-driver/mysql) and PostgreSQL (jackc/pgx in database/sql
 // mode). Schema and placeholder differences are encapsulated in the dialect.
+//
+// Concurrency: database/sql already arbitrates connection use; for SQLite we
+// additionally pin MaxOpenConns=1 (see applyPool) so the file is only written
+// by one goroutine at a time. No application-level mutex is needed — the old
+// global sync.Mutex serialised every cloud-DB write and was the chief
+// throughput ceiling under load.
 type Store struct {
 	db      *sql.DB
 	dialect dialect
-	mu      sync.Mutex
 }
 
 // Config controls how the underlying database connection is opened.
@@ -142,17 +146,14 @@ func (s *Store) migrate() error {
 	return nil
 }
 
-// LogCall persists a single call record.
+// LogCall persists a single call record. Safe for concurrent use; the
+// underlying database/sql pool already serialises connection access and (for
+// SQLite) we pin MaxOpenConns=1 in applyPool which makes writes inherently
+// serial without us needing an application-level mutex.
 func (s *Store) LogCall(ctx context.Context, r CallRecord) error {
 	if r.Timestamp.IsZero() {
 		r.Timestamp = time.Now()
 	}
-	// SQLite serialises writes via a single connection (we set MaxOpenConns=1
-	// for the sqlite dialect). For MySQL/Postgres the database itself
-	// arbitrates writes so we don't need the extra mutex hop, but holding it
-	// briefly doesn't hurt and keeps log ordering predictable in tests.
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx,
 		s.dialect.rebind(`INSERT INTO calls(ts, provider, model, path, status, latency_ms, bytes_in, bytes_out, tokens_in, tokens_out, client_ip, err)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`),

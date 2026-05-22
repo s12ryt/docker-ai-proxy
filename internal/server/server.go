@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -43,11 +44,12 @@ func (s *Server) routes() {
 	s.mux.Handle("/", http.FileServer(http.FS(sub)))
 
 	s.mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		snap := s.cfg.Snapshot()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":      true,
 			"version": "1.0.0",
-			"uptime":  time.Since(s.cfg.StartedAt).Round(time.Second).String(),
+			"uptime":  time.Since(snap.StartedAt).Round(time.Second).String(),
 		})
 	})
 
@@ -111,15 +113,16 @@ func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRuntime(w http.ResponseWriter, _ *http.Request) {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
+	snap := s.cfg.Snapshot()
 	writeJSON(w, map[string]any{
 		"go_version": runtime.Version(),
 		"goroutines": runtime.NumGoroutine(),
 		"heap_alloc": ms.HeapAlloc,
 		"heap_sys":   ms.HeapSys,
 		"num_gc":     ms.NumGC,
-		"started_at": s.cfg.StartedAt,
-		"uptime":     time.Since(s.cfg.StartedAt).Round(time.Second).String(),
-		"providers":  len(s.cfg.Snapshot().Providers),
+		"started_at": snap.StartedAt,
+		"uptime":     time.Since(snap.StartedAt).Round(time.Second).String(),
+		"providers":  len(snap.Providers),
 	})
 }
 
@@ -147,7 +150,8 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		if token == "" {
 			token = r.URL.Query().Get("admin_token")
 		}
-		if token == "" || token != s.cfg.AdminToken {
+		snap := s.cfg.Snapshot()
+		if token == "" || snap.AdminToken == "" || token != snap.AdminToken {
 			http.Error(w, "admin token required", http.StatusUnauthorized)
 			return
 		}
@@ -206,8 +210,27 @@ func (s *Server) withRecover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if v := recover(); v != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				_ = json.NewEncoder(w).Encode(map[string]any{"error": "internal"})
+				// http.ErrAbortHandler is the documented way for a handler to
+				// stop without logging; respect that contract.
+				if v == http.ErrAbortHandler {
+					panic(v)
+				}
+				log.Printf("[panic] %s %s: %v\n%s", r.Method, r.URL.Path, v, debug.Stack())
+				// Best-effort: only write a response if the inner handler hasn't
+				// already started one. The downstream loggingResponseWriter
+				// silently no-ops repeated WriteHeader calls so this is safe.
+				lrw, ok := w.(*loggingResponseWriter)
+				if !ok || !lrw.wroteHeader {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"error": map[string]any{
+							"message": "internal server error",
+							"type":    "ai_hub_panic",
+							"code":    http.StatusInternalServerError,
+						},
+					})
+				}
 			}
 		}()
 		next.ServeHTTP(w, r)
