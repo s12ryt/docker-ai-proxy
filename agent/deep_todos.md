@@ -75,6 +75,15 @@
 - [x] `internal/server/server.go` 接上 `/v1/embeddings` 與 `/v1/completions`，沿用 `requireAccessToken`。
 - [x] 新增 e2e 測試：`TestServeEmbeddings_OpenAICompatibleUpstream`、`TestServeCompletions_OpenAICompatibleUpstream`、`TestServeCompletions_StreamPassThrough`、`TestServeEmbeddings_NonOpenAIProviderRejected`。
 - [x] 本機 portable Go 驗證：`gofmt` + `go test -count=1 ./...` + `go vet ./...` 全通過（Windows 無 CGO，`-race` 仍由 CI Linux runner 驗證）。
+- [x] CI 驗證：`cd12b6f` 後 `ci.yml` 與 `docker-publish.yml` 全綠；Stage 5 完成。
+
+### Stage 6 · OpenAI images/audio 端點
+- [x] `internal/proxy/proxy.go` 新增 `ServeImages`：OpenAI-compatible provider pass-through 到 `/v1/images/*` 子路徑；JSON body 會重寫 `model` 為 upstream model；非 OpenAI-compatible provider 明確回 501。
+- [x] `internal/proxy/proxy.go` 新增 `ServeAudio`：OpenAI-compatible provider pass-through 到 `/v1/audio/*` 子路徑；multipart/form-data 會重寫 `model` part 並保留 `file` 等其他 part。
+- [x] 抽出 `serveOpenAICompatibleMediaEndpoint` / `readMediaRequest` / `rewriteRequestModel` / `rewriteMultipartModel` / `forwardOpenAICompatible`，共用 JSON/multipart model extraction、request rewrite、Bearer/header、response pass-through 與獨立 5s `LogCall` timeout。
+- [x] `internal/server/server.go` 接上 `/v1/images/` 與 `/v1/audio/` prefix，沿用 `requireAccessToken`。
+- [x] 新增 e2e 測試：`TestServeImages_OpenAICompatibleUpstream`、`TestServeAudioTranscriptions_OpenAICompatibleMultipartUpstream`、`TestServeImages_NonOpenAIProviderRejected`、`TestServeImages_RequiresSubpath`。
+- [x] 本機 portable Go 驗證：`gofmt` + `go test -count=1 ./...` + `go vet ./...` + `git diff --check` 全通過（僅 autocrlf warning）。
 
 ## 已完成 (第二輪 bug 排查 · 2026-05-22)
 
@@ -98,7 +107,7 @@
 
 ### P0 · 阻塞性
 
-- [ ] **Stage 5 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
+- [ ] **Stage 6 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
 
 ### P1 · 重要（功能不完整或正確性問題）
 
@@ -115,7 +124,6 @@
 - [ ] **rate limit / per-token quota**：每個 access token 的 RPM/TPM 限制。
 - [ ] **provider 健康檢查**：失敗計數 + 暫時冷卻（circuit breaker），讓 KeyPicker 跳過壞 key。
 - [ ] **dashboard 顯示 token 統計**（依賴上面 token usage 計數）。
-- [ ] **/v1/images、/v1/audio** 等其他 OpenAI 路由的轉發。
 - [ ] **DB schema migration 工具**：現在三套 schema 是 dialect 字串硬編碼，加欄位要三邊改。可導入 `golang-migrate` 或 `pressly/goose` 統一管理版本。
 - [ ] **DB retention job**：背景定時 `DELETE FROM ai_calls WHERE created_at < NOW() - INTERVAL ?`（雲端 DB 必要）。sqlite 時代靠刪檔，現在切雲端後沒清理機制會無限長大。
 - [ ] **DB 連線健康監控**：把 `db.Stats()`（open/idle/wait_count）暴露到 `/api/runtime`，方便診斷雲端連線池異常。

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -1027,6 +1028,202 @@ func TestServeEmbeddings_NonOpenAIProviderRejected(t *testing.T) {
 
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("expected 501, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServeImages_OpenAICompatibleUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var capturedPath, capturedAuth string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"created": 123,
+			"data": []any{map[string]any{
+				"url": "https://example.com/image.png",
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	st, err := store.OpenSQLite(filepath.Join(tmp, "images.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk-img"},
+		Models:     []string{"dall-e-3"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, st)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations",
+		bytes.NewBufferString(`{"model":"dall-e-3","prompt":"a fox"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.ServeImages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	cPath, cAuth, cBody := capturedPath, capturedAuth, capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/images/generations") {
+		t.Fatalf("expected images path, got %s", cPath)
+	}
+	if cAuth != "Bearer sk-img" {
+		t.Fatalf("expected bearer auth, got %q", cAuth)
+	}
+	if cBody["model"] != "dall-e-3" || cBody["prompt"] != "a fox" {
+		t.Fatalf("unexpected upstream body: %v", cBody)
+	}
+	if got := rec.Header().Get("X-AI-Hub-Provider"); got != "openai" {
+		t.Fatalf("expected provider header, got %q", got)
+	}
+	if !strings.Contains(rec.Body.String(), "image.png") {
+		t.Fatalf("expected upstream response passthrough, got %s", rec.Body.String())
+	}
+	rows, err := st.RecentCalls(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Status != 200 || rows[0].Provider != "openai" || rows[0].Path != "/v1/images/generations" {
+		t.Fatalf("bad log: %+v", rows)
+	}
+}
+
+func TestServeAudioTranscriptions_OpenAICompatibleMultipartUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var capturedPath, capturedAuth, capturedModel, capturedFile string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(maxRequestBytes); err != nil {
+			t.Errorf("parse multipart: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			t.Errorf("form file: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+		fileBytes, _ := io.ReadAll(file)
+
+		mu.Lock()
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		capturedModel = r.FormValue("model")
+		capturedFile = string(fileBytes)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"text": "hello transcript"})
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk-audio"},
+		Models:     []string{"whisper-1"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, nil)
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := mw.WriteField("model", "whisper-1"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := mw.CreateFormFile("file", "sample.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(part, "audio-bytes"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	p.ServeAudio(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	cPath, cAuth, cModel, cFile := capturedPath, capturedAuth, capturedModel, capturedFile
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/audio/transcriptions") {
+		t.Fatalf("expected audio path, got %s", cPath)
+	}
+	if cAuth != "Bearer sk-audio" {
+		t.Fatalf("expected bearer auth, got %q", cAuth)
+	}
+	if cModel != "whisper-1" {
+		t.Fatalf("expected rewritten model, got %q", cModel)
+	}
+	if cFile != "audio-bytes" {
+		t.Fatalf("expected file preserved, got %q", cFile)
+	}
+	if !strings.Contains(rec.Body.String(), "hello transcript") {
+		t.Fatalf("expected upstream response passthrough, got %s", rec.Body.String())
+	}
+}
+
+func TestServeImages_NonOpenAIProviderRejected(t *testing.T) {
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "anthropic", Enabled: true,
+		BaseURL:    "https://api.anthropic.com",
+		APIKeys:    []string{"ak"},
+		Models:     []string{"claude-3-5-sonnet-20240620"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations",
+		bytes.NewBufferString(`{"model":"claude-3-5-sonnet-20240620","prompt":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.ServeImages(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServeImages_RequiresSubpath(t *testing.T) {
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    "https://api.openai.com",
+		APIKeys:    []string{"sk"},
+		Models:     []string{"dall-e-3"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images",
+		bytes.NewBufferString(`{"model":"dall-e-3","prompt":"hello"}`))
+	rec := httptest.NewRecorder()
+	p.ServeImages(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

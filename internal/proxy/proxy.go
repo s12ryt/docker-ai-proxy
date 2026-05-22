@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"time"
@@ -195,15 +198,25 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 // ServeEmbeddings handles OpenAI-compatible `/v1/embeddings` requests.
 func (p *Proxy) ServeEmbeddings(w http.ResponseWriter, r *http.Request) {
-	p.serveOpenAICompatibleEndpoint(w, r, "/v1/embeddings", false)
+	p.serveOpenAICompatibleJSONEndpoint(w, r, "/v1/embeddings", false)
 }
 
 // ServeCompletions handles OpenAI-compatible legacy `/v1/completions` requests.
 func (p *Proxy) ServeCompletions(w http.ResponseWriter, r *http.Request) {
-	p.serveOpenAICompatibleEndpoint(w, r, "/v1/completions", true)
+	p.serveOpenAICompatibleJSONEndpoint(w, r, "/v1/completions", true)
 }
 
-func (p *Proxy) serveOpenAICompatibleEndpoint(w http.ResponseWriter, r *http.Request, upstreamPath string, allowStream bool) {
+// ServeImages handles OpenAI-compatible `/v1/images/*` requests.
+func (p *Proxy) ServeImages(w http.ResponseWriter, r *http.Request) {
+	p.serveOpenAICompatibleMediaEndpoint(w, r, "/v1/images")
+}
+
+// ServeAudio handles OpenAI-compatible `/v1/audio/*` requests.
+func (p *Proxy) ServeAudio(w http.ResponseWriter, r *http.Request) {
+	p.serveOpenAICompatibleMediaEndpoint(w, r, "/v1/audio")
+}
+
+func (p *Proxy) serveOpenAICompatibleJSONEndpoint(w http.ResponseWriter, r *http.Request, upstreamPath string, allowStream bool) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -249,12 +262,173 @@ func (p *Proxy) serveOpenAICompatibleEndpoint(w http.ResponseWriter, r *http.Req
 		stream = false
 	}
 
+	p.forwardOpenAICompatible(w, r, provider, upstreamModel, upstreamPath, outBody, int64(len(body)), stream, "application/json", nil)
+}
+
+func (p *Proxy) serveOpenAICompatibleMediaEndpoint(w http.ResponseWriter, r *http.Request, prefix string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	upstreamPath, ok := cleanPrefixedPath(r.URL.Path, prefix)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	body, contentType, requestedModel, err := p.readMediaRequest(r)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing 'model'")
+		return
+	}
+
+	provider, upstreamModel, err := p.cfg.ProviderForModel(requestedModel)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if kind := providerKindOf(provider); kind != kindOpenAI {
+		writeJSONError(w, http.StatusNotImplemented, fmt.Sprintf("%s is only supported for OpenAI-compatible providers", prefix))
+		return
+	}
+
+	outBody, outContentType, err := rewriteRequestModel(body, contentType, upstreamModel)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	p.forwardOpenAICompatible(w, r, provider, upstreamModel, upstreamPath, outBody, int64(len(body)), false, outContentType, nil)
+}
+
+func (p *Proxy) readMediaRequest(r *http.Request) ([]byte, string, string, error) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+	if err != nil {
+		return nil, "", "", fmt.Errorf("read body: %w", err)
+	}
+	defer r.Body.Close()
+
+	contentType := r.Header.Get("Content-Type")
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType == "" {
+		mediaType = "application/json"
+	}
+	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return nil, "", "", errors.New("multipart request missing boundary")
+		}
+		mr := multipart.NewReader(bytes.NewReader(body), boundary)
+		form, err := mr.ReadForm(maxRequestBytes)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("parse multipart form: %w", err)
+		}
+		defer form.RemoveAll()
+		return body, contentType, firstFormValue(form, "model"), nil
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, "", "", fmt.Errorf("invalid JSON: %w", err)
+	}
+	model, _ := payload["model"].(string)
+	return body, contentType, model, nil
+}
+
+func rewriteRequestModel(body []byte, contentType, upstreamModel string) ([]byte, string, error) {
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType == "" {
+		mediaType = "application/json"
+	}
+	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return nil, "", errors.New("multipart request missing boundary")
+		}
+		return rewriteMultipartModel(body, mediaType, boundary, upstreamModel)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, "", fmt.Errorf("invalid JSON: %w", err)
+	}
+	payload["model"] = upstreamModel
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, "", fmt.Errorf("marshal payload: %w", err)
+	}
+	return out, "application/json", nil
+}
+
+func rewriteMultipartModel(body []byte, mediaType, boundary, upstreamModel string) ([]byte, string, error) {
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	var out bytes.Buffer
+	mw := multipart.NewWriter(&out)
+
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("parse multipart form: %w", err)
+		}
+		if part.FormName() == "model" {
+			h := make(textproto.MIMEHeader)
+			for k, values := range part.Header {
+				h[k] = append([]string(nil), values...)
+			}
+			outPart, err := mw.CreatePart(h)
+			if err != nil {
+				return nil, "", err
+			}
+			if _, err := io.WriteString(outPart, upstreamModel); err != nil {
+				return nil, "", err
+			}
+			continue
+		}
+		outPart, err := mw.CreatePart(part.Header)
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := io.Copy(outPart, part); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return nil, "", err
+	}
+	return out.Bytes(), mediaType + "; boundary=" + mw.Boundary(), nil
+}
+
+func firstFormValue(form *multipart.Form, key string) string {
+	if form == nil || form.Value == nil || len(form.Value[key]) == 0 {
+		return ""
+	}
+	return form.Value[key][0]
+}
+
+func cleanPrefixedPath(path, prefix string) (string, bool) {
+	if path == prefix {
+		return "", false
+	}
+	if !strings.HasPrefix(path, prefix+"/") {
+		return "", false
+	}
+	return path, true
+}
+
+func (p *Proxy) forwardOpenAICompatible(w http.ResponseWriter, r *http.Request, provider config.Provider, upstreamModel, upstreamPath string, outBody []byte, bytesIn int64, stream bool, contentType string, extraHeaders map[string]string) {
 	rec := store.CallRecord{
 		Timestamp: time.Now(),
 		Provider:  provider.Name,
 		Model:     upstreamModel,
 		Path:      r.URL.Path,
-		BytesIn:   int64(len(body)),
+		BytesIn:   bytesIn,
 		ClientIP:  clientIP(r),
 	}
 	start := time.Now()
@@ -289,9 +463,15 @@ func (p *Proxy) serveOpenAICompatibleEndpoint(w http.ResponseWriter, r *http.Req
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	req.Header.Set("Content-Type", contentType)
 	if accept := r.Header.Get("Accept"); accept != "" {
 		req.Header.Set("Accept", accept)
+	}
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
 	}
 
 	resp, err := p.client.Do(req)

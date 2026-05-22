@@ -457,3 +457,44 @@
 - `go.exe vet ./...` 全通過。
 
 限制：Stage 5 不做 Anthropic/Gemini 原生 embeddings/completions 翻譯；若未來供應商 API 有明確對應，可新增 IR 或 provider-specific 分支。
+
+---
+
+## 2026-05-22 · Stage 6 OpenAI images/audio 端點
+
+### 目標
+
+補上 OpenAI 相容多媒體端點 prefix：
+
+- `POST /v1/images/*`（例如 `/v1/images/generations`）
+- `POST /v1/audio/*`（例如 `/v1/audio/transcriptions` / `/v1/audio/translations`）
+
+本階段採 **OpenAI-compatible pass-through** 策略：只支援 OpenAI / DeepSeek / 任意 OpenAI 相容 provider；Anthropic/Gemini 沒有等價的 OpenAI images/audio API 語意，先明確回 501。
+
+### 主要變更
+
+1. **`internal/proxy/proxy.go`**
+   - 新增 `ServeImages`：處理 `/v1/images/*`，保留子路徑原樣轉發到 OpenAI-compatible upstream（例如 `/v1/images/generations`）。
+   - 新增 `ServeAudio`：處理 `/v1/audio/*`，保留子路徑原樣轉發到 upstream（例如 `/v1/audio/transcriptions`）。
+   - `serveOpenAICompatibleJSONEndpoint`：保留 Stage 5 embeddings/completions 的 JSON model rewrite 與 pass-through。
+   - 新增 `serveOpenAICompatibleMediaEndpoint`：共用 images/audio 的 path 驗證、body 讀取、model 解析、provider resolution、OpenAI-compatible 限制、request rewrite 與 pass-through。
+   - `readMediaRequest` / `rewriteRequestModel`：支援 JSON 與 multipart/form-data。Audio multipart 會解析 `model` 欄位並重寫成 upstream model，同時保留 `file` 等其他 part 內容與 header。
+   - `forwardOpenAICompatible`：統一負責上游 URL/header、Bearer auth、Content-Type、Accept、獨立 5s `LogCall` timeout 與 `serveStreamThrough` raw response。
+
+2. **`internal/server/server.go`**
+   - 新增 `/v1/images/` 與 `/v1/audio/` prefix route，沿用 `requireAccessToken`。
+
+3. **測試**
+   - `TestServeImages_OpenAICompatibleUpstream`：fake OpenAI upstream 驗證 `/v1/images/generations` path、Bearer auth、JSON body model/prompt、response pass-through、provider header、store log。
+   - `TestServeAudioTranscriptions_OpenAICompatibleMultipartUpstream`：multipart audio request 驗證 `/v1/audio/transcriptions` path、Bearer auth、`model` 欄位與 `file` 內容保留。
+   - `TestServeImages_NonOpenAIProviderRejected`：Anthropic provider 對 images 明確回 501。
+   - `TestServeImages_RequiresSubpath`：`/v1/images` 不帶子路徑回 404，避免 prefix handler 吃掉不完整 endpoint。
+
+### 驗證
+
+- `gofmt.exe -w internal/proxy/proxy.go internal/proxy/proxy_test.go internal/server/server.go`
+- `go.exe test -count=1 ./...` 全通過。
+- `go.exe vet ./...` 全通過。
+- `git diff --check` 僅 Windows autocrlf warning，無 whitespace error。
+
+限制：Stage 6 不做 Anthropic/Gemini 原生 image/audio 轉換；目前是 OpenAI-compatible raw pass-through，包含 JSON 與 multipart model rewrite。
