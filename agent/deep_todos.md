@@ -52,11 +52,20 @@
 
 ### Stage 3 · Anthropic/Gemini 原生入站路由（非串流）
 - [x] `internal/proxy/translate.go` 泛化：新增 `translateChatRequestFrom` / `translateChatResponseTo`，支援 OpenAI / Anthropic / Gemini 任意來源與目的協定的非串流 request/response 翻譯；同協定 response 維持 raw pass-through。
-- [x] `internal/proxy/proxy.go` 新增 `ServeAnthropicMessages`：支援 Anthropic-native `POST /v1/messages` 入站，解碼 Anthropic request → IR → 依目標 provider kind 編碼出站，非串流 response 轉回 Anthropic envelope；`stream:true` 暫 501 待 Stage 4。
-- [x] `internal/proxy/proxy.go` 新增 `ServeGeminiGenerateContent`：支援 Gemini-native `POST /v1beta/models/{model}:generateContent` 入站，從 URL path 解析 model，request/response 經 IR 翻譯；`:streamGenerateContent` 暫 501 待 Stage 4。
+- [x] `internal/proxy/proxy.go` 新增 `ServeAnthropicMessages`：支援 Anthropic-native `POST /v1/messages` 入站，解碼 Anthropic request → IR → 依目標 provider kind 編碼出站，非串流 response 轉回 Anthropic envelope；Stage 4 已補上 `stream:true`。
+- [x] `internal/proxy/proxy.go` 新增 `ServeGeminiGenerateContent`：支援 Gemini-native `POST /v1beta/models/{model}:generateContent` 入站，從 URL path 解析 model，request/response 經 IR 翻譯；Stage 4 已補上 `:streamGenerateContent`。
 - [x] `internal/server/server.go` 接上 `/v1/messages` 與 `/v1beta/models/`，沿用 `requireAccessToken`。
-- [x] 新增 e2e 測試 `TestServeAnthropicMessages_OpenAIUpstream` / `TestServeGeminiGenerateContent_OpenAIUpstream` / `TestServeGeminiGenerateContent_StreamingRejected`，用 fake OpenAI upstream 驗證原生入站 → OpenAI 出站 → 原生 response 回譯。
+- [x] 新增 e2e 測試 `TestServeAnthropicMessages_OpenAIUpstream` / `TestServeGeminiGenerateContent_OpenAIUpstream`，用 fake OpenAI upstream 驗證原生入站 → OpenAI 出站 → 原生 response 回譯。
 - [x] 本機 portable Go 驗證：`gofmt` + `go test -count=1 ./...` 全通過（Windows 無 CGO，`-race` 仍由 CI Linux runner 驗證）。
+
+### Stage 4 · SSE 串流雙向翻譯
+- [x] 新增 `internal/proxy/stream.go`：proxy-local SSE 事件轉換器，支援掃描 `event:` / `data:` SSE frame，解析 OpenAI `chat.completion.chunk`、Anthropic event stream、Gemini `streamGenerateContent` data chunk。
+- [x] `serveChatStreamAs`：統一設定 `Content-Type: text/event-stream`、`Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no`，逐事件轉譯並 flush；非 2xx 仍原樣 pass-through。
+- [x] 新增 OpenAI / Anthropic / Gemini 三種發射器：OpenAI `data: ...` + `[DONE]`、Anthropic `message_start` / `content_block_delta` / `message_delta` / `message_stop`、Gemini SSE data chunk with `candidates[].content.parts[].text` 與 `finishReason`。
+- [x] `translateChatRequestFromWithStream` 支援由 handler 強制覆寫 `IR.Stream`，解決 Gemini 串流由 URL `:streamGenerateContent` 表達而非 body 欄位的差異。
+- [x] 串流接入：OpenAI 入站 `stream:true` → Anthropic/Gemini provider；Anthropic 入站 `stream:true` → 目標 provider；Gemini 入站 `:streamGenerateContent` → 目標 provider。
+- [x] 新增 fake upstream SSE e2e：`TestServeChatCompletions_AnthropicStreamingTranslation`、`TestServeAnthropicMessages_OpenAIStreamingUpstream`、`TestServeGeminiGenerateContent_OpenAIStreamingUpstream`。
+- [x] 本機 portable Go 驗證：`gofmt` + `go test -count=1 ./...` + `go vet ./...` 全通過（Windows 無 CGO，`-race` 仍由 CI Linux runner 驗證）。
 
 ## 已完成 (第二輪 bug 排查 · 2026-05-22)
 
@@ -80,13 +89,9 @@
 
 ### P0 · 阻塞性
 
-- [ ] **Stage 3 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
+- [ ] **Stage 4 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
 
 ### P1 · 重要（功能不完整或正確性問題）
-
-- [ ] **SSE 串流雙向翻譯**：Stage 2/3 已完成 OpenAI / Anthropic / Gemini 非串流雙向翻譯與原生入站；目前 Anthropic/Gemini 串流仍以 501 明確拒絕。
-    - 工作：實作 Anthropic event stream、Gemini streamGenerateContent、OpenAI chat.completion.chunk 之間的事件層 IR 與雙向發射。
-    - 成本：中–大（Stage 4）。
 
 - [ ] **token usage 計數**：proxy 從上游 response body 解析 `usage.{prompt,completion,total}_tokens` 寫入 `store.CallRecord`。
     - 注意：streaming 模式下 OpenAI 通常只在最後一個 chunk 帶 usage（且需 client 設 `stream_options.include_usage:true`）。可在 non-stream 路徑先做。

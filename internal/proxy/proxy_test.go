@@ -439,15 +439,39 @@ func TestServeChatCompletions_GeminiTranslation(t *testing.T) {
 	}
 }
 
-// TestServeChatCompletions_AnthropicStreamingRejected ensures streaming for
-// non-OpenAI providers is explicitly rejected for now (Stage 4 will lift it).
-func TestServeChatCompletions_AnthropicStreamingRejected(t *testing.T) {
+func TestServeChatCompletions_AnthropicStreamingTranslation(t *testing.T) {
+	var mu sync.Mutex
+	var capturedPath, capturedKey string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		capturedPath = r.URL.Path
+		capturedKey = r.Header.Get("x-api-key")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: message_start\n")
+		_, _ = io.WriteString(w, `data: {"type":"message_start","message":{"id":"msg_stream","type":"message","role":"assistant","model":"claude-3-5-sonnet-20240620","content":[]}}`+"\n\n")
+		_, _ = io.WriteString(w, "event: content_block_delta\n")
+		_, _ = io.WriteString(w, `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello stream claude"}}`+"\n\n")
+		_, _ = io.WriteString(w, "event: message_delta\n")
+		_, _ = io.WriteString(w, `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`+"\n\n")
+		_, _ = io.WriteString(w, "event: message_stop\n")
+		_, _ = io.WriteString(w, `data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
 	tmp := t.TempDir()
-	st, _ := store.OpenSQLite(filepath.Join(tmp, "stream.db"))
+	st, err := store.OpenSQLite(filepath.Join(tmp, "stream.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer st.Close()
 	cfg := &config.Config{Providers: []config.Provider{{
 		Name: "anthropic", Enabled: true,
-		BaseURL:    "https://unused.invalid",
+		BaseURL:    upstream.URL,
 		APIKeys:    []string{"k"},
 		Models:     []string{"claude-3-5-sonnet-20240620"},
 		TimeoutSec: 5,
@@ -457,8 +481,39 @@ func TestServeChatCompletions_AnthropicStreamingRejected(t *testing.T) {
 		bytes.NewBufferString(`{"model":"claude-3-5-sonnet-20240620","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
 	p.ServeChatCompletions(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d (%s)", rec.Code, rec.Body.String())
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	cPath, cKey, cBody := capturedPath, capturedKey, capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/messages") {
+		t.Fatalf("expected anthropic messages path, got %s", cPath)
+	}
+	if cKey != "k" {
+		t.Fatalf("expected x-api-key, got %q", cKey)
+	}
+	if cBody["stream"] != true {
+		t.Fatalf("expected upstream stream=true, got %v", cBody["stream"])
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "chat.completion.chunk") || !strings.Contains(out, "hello stream claude") || !strings.Contains(out, "data: [DONE]") {
+		t.Fatalf("expected OpenAI stream chunks, got %s", out)
+	}
+	if got := rec.Header().Get("Cache-Control"); !strings.Contains(got, "no-cache") {
+		t.Fatalf("expected no-cache header, got %q", got)
+	}
+	if got := rec.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("expected X-Accel-Buffering=no, got %q", got)
+	}
+
+	rows, err := st.RecentCalls(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Status != 200 || rows[0].Provider != "anthropic" {
+		t.Fatalf("bad log: %+v", rows)
 	}
 }
 
@@ -661,15 +716,128 @@ func TestServeGeminiGenerateContent_OpenAIUpstream(t *testing.T) {
 	}
 }
 
-func TestServeGeminiGenerateContent_StreamingRejected(t *testing.T) {
-	cfg := &config.Config{}
-	p := New(cfg, nil)
+func TestServeAnthropicMessages_OpenAIStreamingUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var capturedPath, capturedAuth string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"hello anthropic stream"},"finish_reason":null}]}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	st, err := store.OpenSQLite(filepath.Join(tmp, "anthropic-stream-in.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk-up"},
+		Models:     []string{"gpt-4o-mini"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, st)
+
+	body := bytes.NewBufferString(`{
+		"model":"gpt-4o-mini",
+		"max_tokens":64,
+		"stream":true,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
+	rec := httptest.NewRecorder()
+	p.ServeAnthropicMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	cPath, cAuth, cBody := capturedPath, capturedAuth, capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/chat/completions") {
+		t.Fatalf("expected OpenAI chat path, got %s", cPath)
+	}
+	if cAuth != "Bearer sk-up" {
+		t.Fatalf("expected bearer auth, got %q", cAuth)
+	}
+	if cBody["stream"] != true {
+		t.Fatalf("expected upstream stream=true, got %v", cBody["stream"])
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "event: content_block_delta") || !strings.Contains(out, "hello anthropic stream") || !strings.Contains(out, "event: message_stop") {
+		t.Fatalf("expected Anthropic stream events, got %s", out)
+	}
+}
+
+func TestServeGeminiGenerateContent_OpenAIStreamingUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var capturedPath, capturedAuth string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `data: {"id":"chatcmpl-gemini-stream","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"hello gemini stream"},"finish_reason":null}]}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"id":"chatcmpl-gemini-stream","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	st, err := store.OpenSQLite(filepath.Join(tmp, "gemini-stream-in.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk-up"},
+		Models:     []string{"gpt-4o-mini"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, st)
+
 	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gpt-4o-mini:streamGenerateContent",
 		bytes.NewBufferString(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`))
 	rec := httptest.NewRecorder()
 	p.ServeGeminiGenerateContent(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d (%s)", rec.Code, rec.Body.String())
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	cPath, cAuth, cBody := capturedPath, capturedAuth, capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/chat/completions") {
+		t.Fatalf("expected OpenAI chat path, got %s", cPath)
+	}
+	if cAuth != "Bearer sk-up" {
+		t.Fatalf("expected bearer auth, got %q", cAuth)
+	}
+	if cBody["stream"] != true {
+		t.Fatalf("expected upstream stream=true, got %v", cBody["stream"])
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "hello gemini stream") || !strings.Contains(out, "\"finishReason\":\"STOP\"") {
+		t.Fatalf("expected Gemini stream chunks, got %s", out)
 	}
 }
 

@@ -381,3 +381,41 @@
 
 - Anthropic 測試 request 的 `messages[].content` 必須是 Anthropic block array（例如 `[{"type":"text","text":"hi"}]`），不是 OpenAI 的純字串；一開始測試用字串會被 `DecodeAnthropicChat` 拒絕。
 - Stage 3 完成後，非串流的 OpenAI / Anthropic / Gemini 入站與 OpenAI / Anthropic / Gemini 出站已形成 3×3 主路徑；串流仍是 Stage 4。
+
+---
+
+## 2026-05-22 · Stage 4 SSE 串流雙向翻譯
+
+### 目標
+
+補齊 Stage 2/3 暫拒的串流路徑，讓 OpenAI / Anthropic / Gemini 三種入站與三種出站在 SSE 文字增量主路徑上可以互轉。
+
+### 主要變更
+
+1. **新增 `internal/proxy/stream.go`**
+   - `scanSSE` 解析標準 SSE frame，支援 `event:` / 多行 `data:` / comment line / EOF flush。
+   - `parseOpenAIStreamDelta` 解析 OpenAI `chat.completion.chunk` 的 `delta.content`、`finish_reason`、`usage`。
+   - `parseAnthropicStreamDelta` 解析 Anthropic `content_block_delta`、`message_delta`、`message_stop`。
+   - `parseGeminiStreamDelta` 解析 Gemini `streamGenerateContent` data chunk 的 `candidates[].content.parts[].text`、`finishReason`、`usageMetadata`。
+   - `streamEmitter` 可發射 OpenAI SSE (`data: ...` + `[DONE]`)、Anthropic event stream (`message_start` / `content_block_delta` / `message_delta` / `message_stop`)、Gemini SSE data chunk。
+
+2. **proxy 串流接入**
+   - `ServeChatCompletions`：OpenAI 入站 `stream:true` 且 provider 是 Anthropic/Gemini 時，不再 501；request 經 IR 編碼到上游原生 stream，response 經 `serveChatStreamAs` 翻回 OpenAI chunk。
+   - `ServeAnthropicMessages`：Anthropic `stream:true` 進入 shared translated path。
+   - `ServeGeminiGenerateContent`：`:streamGenerateContent` 進入 shared translated path。
+   - `serveTranslatedChatRequest` 取消 stream 501，改用 `translateChatRequestFromWithStream` 強制覆寫 IR.Stream，並用 `upstreamPathForChat(dstKind, upstreamModel, stream)` 選擇 Gemini `generateContent` 或 `streamGenerateContent`。
+   - `serveChatStreamAs` 統一設 `Content-Type: text/event-stream`、`Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no`，逐事件轉譯並 flush；非 2xx 仍 raw pass-through。
+
+3. **測試**
+   - `TestServeChatCompletions_AnthropicStreamingTranslation`：OpenAI stream 入站 → fake Anthropic SSE upstream → OpenAI chunk + `[DONE]`。
+   - `TestServeAnthropicMessages_OpenAIStreamingUpstream`：Anthropic stream 入站 → fake OpenAI SSE upstream → Anthropic event stream。
+   - `TestServeGeminiGenerateContent_OpenAIStreamingUpstream`：Gemini `:streamGenerateContent` 入站 → fake OpenAI SSE upstream → Gemini SSE chunks。
+   - 舊的 `StreamingRejected` 測試已改為實際翻譯測試。
+
+### 驗證
+
+- `gofmt.exe -w internal/proxy/proxy.go internal/proxy/translate.go internal/proxy/stream.go internal/proxy/proxy_test.go`
+- `go.exe test -count=1 ./...` 全通過。
+- `go.exe vet ./...` 全通過。
+
+限制：目前串流轉換覆蓋文字 delta、finish reason、usage 主路徑；tool call streaming 尚未完整抽象，若未來要支援 tool delta 細節需擴充 stream IR。

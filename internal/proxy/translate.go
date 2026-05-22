@@ -89,6 +89,10 @@ func translateChatRequest(srcBody []byte, dst providerKind, upstreamModel string
 // translateChatRequestFrom converts a chat request from any supported inbound
 // wire protocol into the upstream provider's native wire format.
 func translateChatRequestFrom(srcBody []byte, src, dst providerKind, upstreamModel string) ([]byte, protocol.ChatRequest, error) {
+	return translateChatRequestFromWithStream(srcBody, src, dst, upstreamModel, nil)
+}
+
+func translateChatRequestFromWithStream(srcBody []byte, src, dst providerKind, upstreamModel string, stream *bool) ([]byte, protocol.ChatRequest, error) {
 	ir, err := decodeChatRequest(srcBody, src)
 	if err != nil {
 		return nil, protocol.ChatRequest{}, err
@@ -96,6 +100,9 @@ func translateChatRequestFrom(srcBody []byte, src, dst providerKind, upstreamMod
 	// Always replace the model with the provider-native form before encoding
 	// back out — the caller has already resolved aliases.
 	ir.Model = upstreamModel
+	if stream != nil {
+		ir.Stream = *stream
+	}
 
 	out, err := encodeChatRequest(ir, dst)
 	if err != nil {
