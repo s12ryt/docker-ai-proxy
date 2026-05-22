@@ -462,6 +462,217 @@ func TestServeChatCompletions_AnthropicStreamingRejected(t *testing.T) {
 	}
 }
 
+func TestServeAnthropicMessages_OpenAIUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var capturedPath, capturedAuth string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-native-anthropic",
+			"object":"chat.completion",
+			"created":1710000000,
+			"model":"gpt-4o-mini",
+			"choices":[{
+				"index":0,
+				"message":{"role":"assistant","content":"hello anthropic client"},
+				"finish_reason":"stop"
+			}],
+			"usage":{"prompt_tokens":6,"completion_tokens":4,"total_tokens":10}
+		}`))
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	st, err := store.OpenSQLite(filepath.Join(tmp, "anthropic-in.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk-up"},
+		Models:     []string{"gpt-4o-mini"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, st)
+
+	body := bytes.NewBufferString(`{
+		"model":"gpt-4o-mini",
+		"max_tokens":64,
+		"system":"be concise",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
+	rec := httptest.NewRecorder()
+	p.ServeAnthropicMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	cPath, cAuth := capturedPath, capturedAuth
+	cBody := capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/chat/completions") {
+		t.Fatalf("expected OpenAI chat path, got %s", cPath)
+	}
+	if cAuth != "Bearer sk-up" {
+		t.Fatalf("expected bearer auth, got %q", cAuth)
+	}
+	if cBody["model"] != "gpt-4o-mini" {
+		t.Fatalf("expected upstream model, got %v", cBody["model"])
+	}
+	msgs, _ := cBody["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("expected system + user messages upstream, got %v", cBody["messages"])
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["type"] != "message" {
+		t.Fatalf("expected Anthropic message response, got %v", resp["type"])
+	}
+	if resp["stop_reason"] != "end_turn" {
+		t.Fatalf("expected stop_reason=end_turn, got %v", resp["stop_reason"])
+	}
+	content, _ := resp["content"].([]any)
+	if len(content) == 0 || !strings.Contains(toStringForTest(content), "hello anthropic client") {
+		t.Fatalf("expected translated content, got %v", resp["content"])
+	}
+	if got := rec.Header().Get("X-AI-Hub-Provider"); got != "openai" {
+		t.Fatalf("expected provider header openai, got %q", got)
+	}
+
+	rows, err := st.RecentCalls(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Status != 200 || rows[0].Provider != "openai" || rows[0].Path != "/v1/messages" {
+		t.Fatalf("bad log: %+v", rows)
+	}
+}
+
+func TestServeGeminiGenerateContent_OpenAIUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var capturedPath, capturedAuth string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-native-gemini",
+			"object":"chat.completion",
+			"created":1710000000,
+			"model":"gpt-4o-mini",
+			"choices":[{
+				"index":0,
+				"message":{"role":"assistant","content":"hello gemini client"},
+				"finish_reason":"stop"
+			}],
+			"usage":{"prompt_tokens":6,"completion_tokens":4,"total_tokens":10}
+		}`))
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	st, err := store.OpenSQLite(filepath.Join(tmp, "gemini-in.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk-up"},
+		Models:     []string{"gpt-4o-mini"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, st)
+
+	body := bytes.NewBufferString(`{
+		"systemInstruction":{"parts":[{"text":"be concise"}]},
+		"contents":[{"role":"user","parts":[{"text":"hi"}]}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gpt-4o-mini:generateContent", body)
+	rec := httptest.NewRecorder()
+	p.ServeGeminiGenerateContent(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	cPath, cAuth := capturedPath, capturedAuth
+	cBody := capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/chat/completions") {
+		t.Fatalf("expected OpenAI chat path, got %s", cPath)
+	}
+	if cAuth != "Bearer sk-up" {
+		t.Fatalf("expected bearer auth, got %q", cAuth)
+	}
+	if cBody["model"] != "gpt-4o-mini" {
+		t.Fatalf("expected upstream model, got %v", cBody["model"])
+	}
+	if _, ok := cBody["messages"]; !ok {
+		t.Fatalf("expected OpenAI messages upstream, got %v", cBody)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	candidates, _ := resp["candidates"].([]any)
+	if len(candidates) == 0 {
+		t.Fatalf("expected Gemini candidates, got %v", resp)
+	}
+	first, _ := candidates[0].(map[string]any)
+	if first["finishReason"] != "STOP" {
+		t.Fatalf("expected finishReason=STOP, got %v", first["finishReason"])
+	}
+	content, _ := first["content"].(map[string]any)
+	parts, _ := content["parts"].([]any)
+	if len(parts) == 0 || !strings.Contains(toStringForTest(parts), "hello gemini client") {
+		t.Fatalf("expected translated Gemini content, got %v", content)
+	}
+	usage, _ := resp["usageMetadata"].(map[string]any)
+	if usage == nil || toIntForTest(usage["totalTokenCount"]) != 10 {
+		t.Fatalf("expected totalTokenCount=10, got %v", resp["usageMetadata"])
+	}
+}
+
+func TestServeGeminiGenerateContent_StreamingRejected(t *testing.T) {
+	cfg := &config.Config{}
+	p := New(cfg, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gpt-4o-mini:streamGenerateContent",
+		bytes.NewBufferString(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`))
+	rec := httptest.NewRecorder()
+	p.ServeGeminiGenerateContent(rec, req)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func toStringForTest(v any) string {
 	switch s := v.(type) {
 	case string:

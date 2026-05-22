@@ -329,3 +329,55 @@
   - `go test -run TestServeChatCompletions_ -count=1 -v ./internal/proxy` 通過。
   - `go test -count=1 ./...` 全套通過。
 - 注意：CI Linux runner 能跑 `-race`；Windows portable Go 本機只能覆蓋非 race assertion/build。若 CI 再紅，再依 CI 查下一個 race 或測試問題。
+
+---
+
+## 2026-05-22 · Stage 3 Anthropic/Gemini 原生入站路由
+
+### 目標
+
+延續 Stage 1/2 的 IR 與 OpenAI 入站翻譯能力，新增兩條原生入站協定：
+
+- Anthropic-compatible：`POST /v1/messages`
+- Gemini-compatible：`POST /v1beta/models/{model}:generateContent`
+
+本階段只做非串流；Anthropic `stream:true` 與 Gemini `:streamGenerateContent` 都明確回 501，留給 Stage 4 的 SSE 事件層雙向翻譯。
+
+### 主要變更
+
+1. **`internal/proxy/translate.go` 泛化**
+   - 新增 `translateChatRequestFrom(srcBody, srcKind, dstKind, upstreamModel)`：OpenAI / Anthropic / Gemini 任意來源 request → IR → 任意目的 request。
+   - 新增 `translateChatResponseTo(srcKind, dstKind, requestModel, upstreamBody)`：任意 upstream response → IR → client 期望協定 response。
+   - `srcKind == dstKind` 時 response 直接 raw pass-through，不做 decode/encode，避免破壞同協定原廠 response。
+   - `encodeChatResponse` 對 OpenAI / Gemini 目的端會清空 `NativeFinish`，讓 encoder 使用正常化後的 `StopReason`；Anthropic encoder 本來就使用正常化 stop reason。
+
+2. **`internal/proxy/proxy.go` 新增原生入站 handler**
+   - `ServeAnthropicMessages`：處理 Anthropic-native `/v1/messages`，解碼 Anthropic request，依 model 解析 provider，轉成上游 provider kind，再把 response 轉回 Anthropic envelope。
+   - `ServeGeminiGenerateContent`：處理 Gemini-native `/v1beta/models/{model}:generateContent`，從 URL path 解析 model，解碼 Gemini body，依 provider kind 出站，再把 response 轉回 Gemini response。
+   - `parseGeminiGenerateContentPath` 支援 URL unescape，辨識 `:generateContent` 與 `:streamGenerateContent`。
+   - 抽出 `serveTranslatedChatRequest`：共用 provider resolution、request 翻譯、upstream HTTP、獨立 5s `LogCall` timeout。
+   - 抽出 `serveChatResponseAs`：共用非 2xx pass-through 與 2xx response 翻譯。原 Stage 2 `serveTranslatedChatResponse` 改成包裝 `dst=OpenAI`，保留既有 OpenAI 入站測試語意。
+
+3. **`internal/server/server.go` 路由**
+   - 新增 `/v1/messages` → `requireAccessToken` → `ServeAnthropicMessages`。
+   - 新增 `/v1beta/models/` prefix → `requireAccessToken` → `ServeGeminiGenerateContent`。
+
+### 測試與驗證
+
+新增 `internal/proxy/proxy_test.go` e2e 測試：
+
+- `TestServeAnthropicMessages_OpenAIUpstream`：Anthropic 入站 → fake OpenAI upstream → Anthropic response。驗證 Bearer auth、上游 `/v1/chat/completions`、OpenAI body model/messages、回譯 `type=message`、`stop_reason=end_turn`、內容文字、provider header 與 store log。
+- `TestServeGeminiGenerateContent_OpenAIUpstream`：Gemini 入站 → fake OpenAI upstream → Gemini response。驗證 path model、OpenAI body、回譯 `candidates[].content.parts[].text`、`finishReason=STOP`、usage token 映射。
+- `TestServeGeminiGenerateContent_StreamingRejected`：`:streamGenerateContent` 暫回 501。
+
+本機 portable Go 驗證：
+
+- `gofmt.exe -w internal/proxy/proxy.go internal/proxy/translate.go internal/server/server.go internal/proxy/proxy_test.go`
+- `go.exe test -count=1 ./...` 全通過。
+
+限制：Windows portable Go 仍無 CGO toolchain，不能跑 `-race`；CI Linux runner 會跑 race detector。
+
+### 注意事項
+
+- Anthropic 測試 request 的 `messages[].content` 必須是 Anthropic block array（例如 `[{"type":"text","text":"hi"}]`），不是 OpenAI 的純字串；一開始測試用字串會被 `DecodeAnthropicChat` 拒絕。
+- Stage 3 完成後，非串流的 OpenAI / Anthropic / Gemini 入站與 OpenAI / Anthropic / Gemini 出站已形成 3×3 主路徑；串流仍是 Stage 4。

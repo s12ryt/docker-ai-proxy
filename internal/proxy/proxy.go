@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -200,6 +201,176 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 	p.serveStreamThrough(w, resp, provider.Name, stream, &rec)
 }
 
+// ServeAnthropicMessages handles Anthropic-native `/v1/messages` requests.
+func (p *Proxy) ServeAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	defer r.Body.Close()
+
+	ir, err := decodeChatRequest(body, kindAnthropic)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if ir.Stream {
+		writeJSONError(w, http.StatusNotImplemented,
+			"streaming for Anthropic-native requests is not yet supported; set \"stream\": false")
+		return
+	}
+
+	p.serveTranslatedChatRequest(w, r, kindAnthropic, ir.Model, body, false)
+}
+
+// ServeGeminiGenerateContent handles Gemini-native generateContent requests.
+func (p *Proxy) ServeGeminiGenerateContent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	requestedModel, stream, ok := parseGeminiGenerateContentPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if stream {
+		writeJSONError(w, http.StatusNotImplemented,
+			"streaming for Gemini-native requests is not yet supported; use :generateContent")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	defer r.Body.Close()
+
+	if _, err := decodeChatRequest(body, kindGemini); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	p.serveTranslatedChatRequest(w, r, kindGemini, requestedModel, body, false)
+}
+
+func (p *Proxy) serveTranslatedChatRequest(w http.ResponseWriter, r *http.Request, inKind providerKind, requestedModel string, body []byte, stream bool) {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing model")
+		return
+	}
+
+	provider, upstreamModel, err := p.cfg.ProviderForModel(requestedModel)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	dstKind := providerKindOf(provider)
+	if stream {
+		writeJSONError(w, http.StatusNotImplemented,
+			"streaming translation is not yet supported; set stream to false")
+		return
+	}
+
+	outBody, _, err := translateChatRequestFrom(body, inKind, dstKind, upstreamModel)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	rec := store.CallRecord{
+		Timestamp: time.Now(),
+		Provider:  provider.Name,
+		Model:     upstreamModel,
+		Path:      r.URL.Path,
+		BytesIn:   int64(len(body)),
+		ClientIP:  clientIP(r),
+	}
+	start := time.Now()
+
+	defer func() {
+		rec.LatencyMS = time.Since(start).Milliseconds()
+		if p.store == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), logCallTimeout)
+		defer cancel()
+		_ = p.store.LogCall(ctx, rec)
+	}()
+
+	upstreamPath := upstreamPathForChat(dstKind, upstreamModel, false)
+	upstreamURL, headers, err := buildUpstreamRequest(provider, upstreamPath, p.picker.Pick(provider))
+	if err != nil {
+		rec.Status = http.StatusBadGateway
+		rec.ErrMessage = err.Error()
+		writeJSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(provider.TimeoutSec)*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(outBody))
+	if err != nil {
+		rec.Status = http.StatusInternalServerError
+		rec.ErrMessage = err.Error()
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if accept := r.Header.Get("Accept"); accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		rec.Status = http.StatusBadGateway
+		rec.ErrMessage = err.Error()
+		writeJSONError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	p.serveChatResponseAs(w, resp, dstKind, inKind, requestedModel, provider.Name, &rec)
+}
+
+func parseGeminiGenerateContentPath(path string) (model string, stream bool, ok bool) {
+	const prefix = "/v1beta/models/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false, false
+	}
+	tail := strings.TrimPrefix(path, prefix)
+	suffix := ":generateContent"
+	if strings.HasSuffix(tail, ":streamGenerateContent") {
+		stream = true
+		suffix = ":streamGenerateContent"
+	} else if !strings.HasSuffix(tail, suffix) {
+		return "", false, false
+	}
+	modelPart := strings.TrimSuffix(tail, suffix)
+	modelPart = strings.TrimSpace(modelPart)
+	if modelPart == "" {
+		return "", stream, false
+	}
+	decoded, err := url.PathUnescape(modelPart)
+	if err != nil {
+		return "", stream, false
+	}
+	return decoded, stream, true
+}
+
 // serveStreamThrough copies the upstream response to the client verbatim,
 // flushing after every chunk. Used for OpenAI-compatible upstreams where the
 // wire format is already what the client expects.
@@ -270,9 +441,10 @@ func (p *Proxy) serveStreamThrough(w http.ResponseWriter, resp *http.Response, p
 // responses are echoed verbatim with the original status code (so clients see
 // vendor error messages); only 2xx bodies go through translation.
 func (p *Proxy) serveTranslatedChatResponse(w http.ResponseWriter, resp *http.Response, kind providerKind, requestedModel, providerName string, rec *store.CallRecord) {
-	defer func() {
-		// resp.Body is closed by the caller's deferred Close, not here.
-	}()
+	p.serveChatResponseAs(w, resp, kind, kindOpenAI, requestedModel, providerName, rec)
+}
+
+func (p *Proxy) serveChatResponseAs(w http.ResponseWriter, resp *http.Response, srcKind, dstKind providerKind, requestedModel, providerName string, rec *store.CallRecord) {
 	upstreamBody, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBytes))
 	if err != nil {
 		rec.Status = http.StatusBadGateway
@@ -302,7 +474,7 @@ func (p *Proxy) serveTranslatedChatResponse(w http.ResponseWriter, resp *http.Re
 		return
 	}
 
-	translated, err := translateChatResponse(kind, requestedModel, upstreamBody)
+	translated, err := translateChatResponseTo(srcKind, dstKind, requestedModel, upstreamBody)
 	if err != nil {
 		rec.Status = http.StatusBadGateway
 		rec.ErrMessage = err.Error()

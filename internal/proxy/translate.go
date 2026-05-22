@@ -80,44 +80,73 @@ func upstreamPathForChat(kind providerKind, model string, stream bool) string {
 }
 
 // translateChatRequest converts an OpenAI-format `/v1/chat/completions`
-// request body into the wire format expected by `dst`. When `dst` is
-// kindOpenAI the body is returned unchanged (after model rewrite).
-//
-// The returned body is ready to ship verbatim to the upstream provider.
+// request body into the wire format expected by `dst`. It is kept for the
+// Stage 2 OpenAI-in path; Stage 3 native routes use translateChatRequestFrom.
 func translateChatRequest(srcBody []byte, dst providerKind, upstreamModel string) ([]byte, protocol.ChatRequest, error) {
-	ir, err := protocol.DecodeOpenAIChat(srcBody)
+	return translateChatRequestFrom(srcBody, kindOpenAI, dst, upstreamModel)
+}
+
+// translateChatRequestFrom converts a chat request from any supported inbound
+// wire protocol into the upstream provider's native wire format.
+func translateChatRequestFrom(srcBody []byte, src, dst providerKind, upstreamModel string) ([]byte, protocol.ChatRequest, error) {
+	ir, err := decodeChatRequest(srcBody, src)
 	if err != nil {
-		return nil, protocol.ChatRequest{}, fmt.Errorf("decode openai request: %w", err)
+		return nil, protocol.ChatRequest{}, err
 	}
-	// Always replace the model with the provider-native form before
-	// encoding back out — the caller has already resolved aliases.
+	// Always replace the model with the provider-native form before encoding
+	// back out — the caller has already resolved aliases.
 	ir.Model = upstreamModel
 
-	switch dst {
+	out, err := encodeChatRequest(ir, dst)
+	if err != nil {
+		return nil, ir, err
+	}
+	return out, ir, nil
+}
+
+func decodeChatRequest(body []byte, kind providerKind) (protocol.ChatRequest, error) {
+	switch kind {
+	case kindAnthropic:
+		ir, err := protocol.DecodeAnthropicChat(body)
+		if err != nil {
+			return protocol.ChatRequest{}, fmt.Errorf("decode anthropic request: %w", err)
+		}
+		return ir, nil
+	case kindGemini:
+		ir, err := protocol.DecodeGeminiChat(body)
+		if err != nil {
+			return protocol.ChatRequest{}, fmt.Errorf("decode gemini request: %w", err)
+		}
+		return ir, nil
+	default:
+		ir, err := protocol.DecodeOpenAIChat(body)
+		if err != nil {
+			return protocol.ChatRequest{}, fmt.Errorf("decode openai request: %w", err)
+		}
+		return ir, nil
+	}
+}
+
+func encodeChatRequest(ir protocol.ChatRequest, kind providerKind) ([]byte, error) {
+	switch kind {
 	case kindAnthropic:
 		out, err := protocol.EncodeAnthropicChat(ir)
 		if err != nil {
-			return nil, ir, fmt.Errorf("encode anthropic request: %w", err)
+			return nil, fmt.Errorf("encode anthropic request: %w", err)
 		}
-		return out, ir, nil
+		return out, nil
 	case kindGemini:
 		out, err := protocol.EncodeGeminiChat(ir)
 		if err != nil {
-			return nil, ir, fmt.Errorf("encode gemini request: %w", err)
+			return nil, fmt.Errorf("encode gemini request: %w", err)
 		}
-		return out, ir, nil
+		return out, nil
 	default:
-		// OpenAI / DeepSeek / any OAI-compatible upstream: re-emit the
-		// IR through the OpenAI encoder so we end up with a canonical
-		// (and validated) payload rather than blindly forwarding raw
-		// JSON. The fast pass-through path remains available via
-		// translateChatRequestPassThrough for callers that want to
-		// preserve byte-identical bodies.
 		out, err := protocol.EncodeOpenAIChat(ir)
 		if err != nil {
-			return nil, ir, fmt.Errorf("encode openai request: %w", err)
+			return nil, fmt.Errorf("encode openai request: %w", err)
 		}
-		return out, ir, nil
+		return out, nil
 	}
 }
 
@@ -129,25 +158,61 @@ func translateChatRequest(srcBody []byte, dst providerKind, upstreamModel string
 // back so clients see a stable identifier even when the upstream returns a
 // different model id (Anthropic does this routinely).
 func translateChatResponse(src providerKind, requestModel string, upstreamBody []byte) ([]byte, error) {
-	switch src {
-	case kindAnthropic:
-		ir, err := protocol.DecodeAnthropicResponse(upstreamBody)
-		if err != nil {
-			return nil, fmt.Errorf("decode anthropic response: %w", err)
-		}
-		fillDefaultsForOpenAIResponse(&ir, requestModel)
-		return protocol.EncodeOpenAIResponse(ir)
-	case kindGemini:
-		ir, err := protocol.DecodeGeminiResponse(upstreamBody)
-		if err != nil {
-			return nil, fmt.Errorf("decode gemini response: %w", err)
-		}
-		fillDefaultsForOpenAIResponse(&ir, requestModel)
-		return protocol.EncodeOpenAIResponse(ir)
-	default:
-		// Pass through unchanged. If the upstream emitted invalid JSON
-		// we still forward it so the client sees the original error.
+	return translateChatResponseTo(src, kindOpenAI, requestModel, upstreamBody)
+}
+
+// translateChatResponseTo converts an upstream non-stream chat response from
+// src protocol into the client-facing dst protocol.
+func translateChatResponseTo(src, dst providerKind, requestModel string, upstreamBody []byte) ([]byte, error) {
+	if src == dst {
+		// Pass through unchanged. If the upstream emitted invalid JSON we still
+		// forward it so the client sees the original response.
 		return upstreamBody, nil
+	}
+
+	ir, err := decodeChatResponse(upstreamBody, src)
+	if err != nil {
+		return nil, err
+	}
+	return encodeChatResponse(ir, dst, requestModel)
+}
+
+func decodeChatResponse(body []byte, kind providerKind) (protocol.ChatResponse, error) {
+	switch kind {
+	case kindAnthropic:
+		ir, err := protocol.DecodeAnthropicResponse(body)
+		if err != nil {
+			return protocol.ChatResponse{}, fmt.Errorf("decode anthropic response: %w", err)
+		}
+		return ir, nil
+	case kindGemini:
+		ir, err := protocol.DecodeGeminiResponse(body)
+		if err != nil {
+			return protocol.ChatResponse{}, fmt.Errorf("decode gemini response: %w", err)
+		}
+		return ir, nil
+	default:
+		ir, err := protocol.DecodeOpenAIResponse(body)
+		if err != nil {
+			return protocol.ChatResponse{}, fmt.Errorf("decode openai response: %w", err)
+		}
+		return ir, nil
+	}
+}
+
+func encodeChatResponse(ir protocol.ChatResponse, kind providerKind, requestModel string) ([]byte, error) {
+	if ir.Model == "" {
+		ir.Model = requestModel
+	}
+	switch kind {
+	case kindAnthropic:
+		return protocol.EncodeAnthropicResponse(ir)
+	case kindGemini:
+		clearNativeFinish(&ir)
+		return protocol.EncodeGeminiResponse(ir)
+	default:
+		fillDefaultsForOpenAIResponse(&ir, requestModel)
+		return protocol.EncodeOpenAIResponse(ir)
 	}
 }
 
@@ -163,11 +228,15 @@ func fillDefaultsForOpenAIResponse(ir *protocol.ChatResponse, requestModel strin
 	if ir.Model == "" {
 		ir.Model = requestModel
 	}
+	clearNativeFinish(ir)
+}
+
+func clearNativeFinish(ir *protocol.ChatResponse) {
 	for i := range ir.Choices {
 		// NativeFinish preserves vendor-specific stop reasons inside the IR
-		// (e.g. Anthropic "end_turn", Gemini "STOP"). When translating
-		// back to OpenAI format we must emit OpenAI finish_reason values, so
-		// force EncodeOpenAIResponse to use the normalised StopReason field.
+		// (e.g. Anthropic "end_turn", Gemini "STOP"). When translating to a
+		// different wire protocol we must emit that protocol's canonical finish
+		// values, so force encoders to use the normalised StopReason field.
 		ir.Choices[i].NativeFinish = ""
 	}
 }

@@ -54,6 +54,8 @@ func (s *Server) routes() {
 	})
 
 	s.mux.Handle("/v1/chat/completions", s.requireAccessToken(http.HandlerFunc(s.prx.ServeChatCompletions)))
+	s.mux.Handle("/v1/messages", s.requireAccessToken(http.HandlerFunc(s.prx.ServeAnthropicMessages)))
+	s.mux.Handle("/v1beta/models/", s.requireAccessToken(http.HandlerFunc(s.prx.ServeGeminiGenerateContent)))
 	s.mux.Handle("/v1/models", s.requireAccessToken(http.HandlerFunc(s.prx.ServeModels)))
 
 	s.mux.Handle("/api/summary", s.requireAdmin(http.HandlerFunc(s.handleSummary)))
