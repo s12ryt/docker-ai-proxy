@@ -25,7 +25,7 @@
       "display_name": "OpenAI",
       "base_url": "https://api.openai.com",
       "api_keys": ["sk-REPLACE_ME"],
-      "models": ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"],
+      "models": ["gpt-4o", "gpt-4o-mini", "text-embedding-3-small", "dall-e-3", "whisper-1"],
       "enabled": false,
       "weight": 1,
       "timeout_sec": 120
@@ -35,7 +35,17 @@
       "display_name": "Anthropic",
       "base_url": "https://api.anthropic.com",
       "api_keys": ["ak-REPLACE_ME"],
-      "models": ["claude-3-5-sonnet"],
+      "models": ["claude-3-5-sonnet-20240620", "claude-3-5-haiku-20241022"],
+      "enabled": false,
+      "weight": 1,
+      "timeout_sec": 120
+    },
+    {
+      "name": "gemini",
+      "display_name": "Gemini",
+      "base_url": "https://generativelanguage.googleapis.com",
+      "api_keys": ["AIza-REPLACE_ME"],
+      "models": ["gemini-1.5-pro", "gemini-1.5-flash"],
       "enabled": false,
       "weight": 1,
       "timeout_sec": 120

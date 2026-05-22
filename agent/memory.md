@@ -498,3 +498,34 @@
 - `git diff --check` 僅 Windows autocrlf warning，無 whitespace error。
 
 限制：Stage 6 不做 Anthropic/Gemini 原生 image/audio 轉換；目前是 OpenAI-compatible raw pass-through，包含 JSON 與 multipart model rewrite。
+
+---
+
+## 2026-05-22 · Stage 7 README 與最終文件整理
+
+### 目標
+
+收尾多協定接入 Stage 1–6 的使用者文件與接手文件，讓 README / config 範例 / agent 紀錄都反映目前真實功能面。
+
+### 主要變更
+
+1. **`README.md`**
+   - 專案定位更新為「多協定 AI 模型聚合網關」。
+   - 特性補齊 OpenAI / Anthropic / Gemini chat 入站與轉出、SSE 串流翻譯、OpenAI embeddings/completions/images/audio pass-through。
+   - `config.json` 範本加入 OpenAI 多媒體/embedding 模型、Anthropic、Gemini、DeepSeek 範例。
+   - API 區補 OpenAI `/v1/chat/completions`、Anthropic `/v1/messages`、Gemini `:generateContent` 範例。
+   - 新增 OpenAI 常用端點表：`/v1/embeddings`、`/v1/completions`、`/v1/images/*`、`/v1/audio/*`，並標明僅 OpenAI-compatible provider 支援，其他 provider 回 501。
+
+2. **`config.example.json`**
+   - OpenAI 範例 models 補 `text-embedding-3-small`、`dall-e-3`、`whisper-1`。
+   - Anthropic models 更新到日期版 Claude 3.5。
+   - 新增 Gemini provider 範例（預設 disabled）。
+
+3. **`agent/*`**
+   - `deep_todos.md` 補 Stage 6 CI 全綠紀錄，新增 Stage 7 文件收尾紀錄，將當前 P0 改為 Stage 7 CI 驗證。
+   - `項目表.md` 更新 README / config.example 描述。
+   - `memory.md` 追加本段，保留後續接手脈絡。
+
+### 驗證
+
+- Stage 7 是文件/config 範例更新；仍需在 commit 前跑 `go test -count=1 ./...`、`go vet ./...`、`git diff --check`，並以 CI 驗證最終狀態。

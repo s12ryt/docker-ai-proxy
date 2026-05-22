@@ -84,6 +84,13 @@
 - [x] `internal/server/server.go` 接上 `/v1/images/` 與 `/v1/audio/` prefix，沿用 `requireAccessToken`。
 - [x] 新增 e2e 測試：`TestServeImages_OpenAICompatibleUpstream`、`TestServeAudioTranscriptions_OpenAICompatibleMultipartUpstream`、`TestServeImages_NonOpenAIProviderRejected`、`TestServeImages_RequiresSubpath`。
 - [x] 本機 portable Go 驗證：`gofmt` + `go test -count=1 ./...` + `go vet ./...` + `git diff --check` 全通過（僅 autocrlf warning）。
+- [x] CI 驗證：`c68068a` 後 `ci.yml` 與 `docker-publish.yml` 全綠；Stage 6 完成。
+
+### Stage 7 · README 與最終文件整理
+- [x] `README.md` 更新為多協定 AI gateway 說明：OpenAI / Anthropic / Gemini chat 入站、協定互轉、SSE 串流翻譯、OpenAI embeddings/completions/images/audio pass-through。
+- [x] README API 範例補齊 `/v1/chat/completions`、`/v1/messages`、Gemini `:generateContent`、OpenAI 常用端點表與非 OpenAI-compatible provider 的 501 行為。
+- [x] `config.example.json` 補 Gemini provider，更新 OpenAI/Anthropic 範例 models，涵蓋 embeddings/images/audio 常用模型。
+- [x] `agent/memory.md`、`agent/deep_todos.md`、`agent/項目表.md` 同步最終功能面與 backlog 狀態。
 
 ## 已完成 (第二輪 bug 排查 · 2026-05-22)
 
@@ -107,7 +114,7 @@
 
 ### P0 · 阻塞性
 
-- [ ] **Stage 6 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
+- [ ] **Stage 7 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
 
 ### P1 · 重要（功能不完整或正確性問題）
 

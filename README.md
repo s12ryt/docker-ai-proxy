@@ -1,6 +1,6 @@
 # AI Hub · 多模型聚合分發網關
 
-> 用 Go 撰寫的 **OpenAI 相容** AI 模型聚合網關。把 OpenAI、Anthropic、Gemini、DeepSeek 與任意 OpenAI 相容端點整合進**單一 API**,內建密鑰池、流式轉發、SQLite 觀測、漂亮的暗黑玻璃擬態控制台 — 單檔靜態二進制,Docker 鏡像 < 25 MB。
+> 用 Go 撰寫的 **多協定 AI 模型聚合網關**。把 OpenAI、Anthropic、Gemini、DeepSeek 與任意 OpenAI 相容端點整合進**單一 API**；支援 OpenAI / Anthropic / Gemini chat 協定互轉、SSE 串流翻譯、OpenAI embeddings/completions/images/audio 端點轉發，內建密鑰池、SQLite/MySQL/PostgreSQL 觀測、漂亮的暗黑玻璃擬態控制台 — 單檔靜態二進制，Docker 鏡像 < 25 MB。
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-22d3ee)
 ![Go](https://img.shields.io/badge/Go-1.22-7c3aed)
@@ -10,14 +10,15 @@
 
 ## ✨ 特性
 
-- **單一 OpenAI 相容 API**:`/v1/chat/completions` + `/v1/models`,既有 SDK 零改動接入
-- **多供應商**:OpenAI / Anthropic / Gemini / DeepSeek,以及任何 OpenAI 相容端點
-- **密鑰池**:每個供應商可配置多把 Key,自動輪轉
-- **訪問控制**:管理員 Token + 客戶端訪問 Token 白名單
-- **流式 SSE 透傳**:零緩衝,延遲幾乎等同直連上游
-- **實時觀測**:SQLite / MySQL / PostgreSQL 三選一(純 Go 驅動,無 CGO)記錄每次呼叫,內建儀表板
-- **單檔部署**:Go 靜態二進制,Docker 鏡像基於 `distroless/static` 約 20-25 MB
-- **多架構鏡像**:`linux/amd64` + `linux/arm64`,自動發佈到 `ghcr.io`
+- **多協定 Chat API**：OpenAI `/v1/chat/completions`、Anthropic `/v1/messages`、Gemini `:generateContent` 可互相接入與轉出
+- **OpenAI 常用端點**：`/v1/embeddings`、`/v1/completions`、`/v1/images/*`、`/v1/audio/*` 對 OpenAI-compatible provider 透傳
+- **多供應商**：OpenAI / Anthropic / Gemini / DeepSeek，以及任何 OpenAI 相容端點
+- **流式 SSE 翻譯**：OpenAI chunk、Anthropic event stream、Gemini streamGenerateContent 文字 delta 雙向轉譯
+- **密鑰池**：每個供應商可配置多把 Key，自動輪轉
+- **訪問控制**：管理員 Token + 客戶端訪問 Token 白名單
+- **實時觀測**：SQLite / MySQL / PostgreSQL 三選一（純 Go 驅動，無 CGO）記錄每次呼叫，內建儀表板
+- **單檔部署**：Go 靜態二進制，Docker 鏡像基於 `distroless/static` 約 20-25 MB
+- **多架構鏡像**：`linux/amd64` + `linux/arm64`，自動發佈到 `ghcr.io`
 
 ## 🚀 快速開始
 
@@ -119,7 +120,23 @@ DSN 格式:
       "name": "openai",
       "base_url": "https://api.openai.com",
       "api_keys": ["sk-xxx", "sk-yyy"],
-      "models": ["gpt-4o", "gpt-4o-mini"],
+      "models": ["gpt-4o", "gpt-4o-mini", "text-embedding-3-small", "dall-e-3", "whisper-1"],
+      "enabled": true,
+      "timeout_sec": 120
+    },
+    {
+      "name": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "api_keys": ["ak-..."],
+      "models": ["claude-3-5-sonnet-20240620"],
+      "enabled": true,
+      "timeout_sec": 120
+    },
+    {
+      "name": "gemini",
+      "base_url": "https://generativelanguage.googleapis.com",
+      "api_keys": ["AIza..."],
+      "models": ["gemini-1.5-pro", "gemini-1.5-flash"],
       "enabled": true,
       "timeout_sec": 120
     },
@@ -147,6 +164,8 @@ curl -H "Authorization: Bearer $AI_HUB_TOKEN" \
 
 ### 對話補全
 
+OpenAI 相容入站：
+
 ```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $AI_HUB_TOKEN" \
@@ -157,6 +176,45 @@ curl http://localhost:8080/v1/chat/completions \
     "stream": true
   }'
 ```
+
+Anthropic 原生入站：
+
+```bash
+curl http://localhost:8080/v1/messages \
+  -H "Authorization: Bearer $AI_HUB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20240620",
+    "max_tokens": 1024,
+    "messages": [{"role":"user","content":[{"type":"text","text":"Hello!"}]}]
+  }'
+```
+
+Gemini 原生入站：
+
+```bash
+curl http://localhost:8080/v1beta/models/gemini-1.5-pro:generateContent \
+  -H "Authorization: Bearer $AI_HUB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [{"role":"user","parts":[{"text":"Hello!"}]}]
+  }'
+```
+
+以上三種 chat 入站都會依 `model` 自動選 provider，必要時在 OpenAI / Anthropic / Gemini 協定間轉換。串流也支援主路徑文字 delta 轉譯：OpenAI `stream:true`、Anthropic `stream:true`、Gemini `:streamGenerateContent`。
+
+### OpenAI 常用端點
+
+以下端點對 OpenAI-compatible provider（OpenAI、DeepSeek、或其他 OpenAI 相容服務）做原樣轉發，並會把 `model` 重寫成 provider 內部模型名：
+
+| 端點 | 說明 |
+| --- | --- |
+| `POST /v1/embeddings` | Embeddings |
+| `POST /v1/completions` | Legacy text completions，支援 SSE pass-through |
+| `POST /v1/images/*` | Images，例如 `/v1/images/generations` |
+| `POST /v1/audio/*` | Audio，例如 `/v1/audio/transcriptions`；支援 multipart/form-data |
+
+非 OpenAI-compatible provider 對這些端點會明確回 `501 Not Implemented`，避免做語意不一致的假翻譯。
 
 ### 跨供應商路由
 
