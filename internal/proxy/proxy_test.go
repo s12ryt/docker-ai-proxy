@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/s12ryt/docker-ai-proxy/internal/config"
@@ -214,13 +215,16 @@ func TestServeChatCompletions_UpstreamError(t *testing.T) {
 // Anthropic-out → OpenAI-back round-trip works against a fake Anthropic
 // /v1/messages endpoint.
 func TestServeChatCompletions_AnthropicTranslation(t *testing.T) {
+	var mu sync.Mutex
 	var capturedPath, capturedKey, capturedVersion string
 	var capturedBody map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		capturedPath = r.URL.Path
 		capturedKey = r.Header.Get("x-api-key")
 		capturedVersion = r.Header.Get("anthropic-version")
 		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
 		// Reply with a minimal Anthropic /v1/messages response.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
@@ -269,24 +273,28 @@ func TestServeChatCompletions_AnthropicTranslation(t *testing.T) {
 	}
 
 	// Upstream request shape — should be native Anthropic.
-	if !strings.HasSuffix(capturedPath, "/v1/messages") {
-		t.Fatalf("expected /v1/messages, got %s", capturedPath)
+	mu.Lock()
+	cPath, cKey, cVersion := capturedPath, capturedKey, capturedVersion
+	cBody := capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/messages") {
+		t.Fatalf("expected /v1/messages, got %s", cPath)
 	}
-	if capturedKey != "ak-test" {
-		t.Fatalf("expected x-api-key=ak-test, got %q", capturedKey)
+	if cKey != "ak-test" {
+		t.Fatalf("expected x-api-key=ak-test, got %q", cKey)
 	}
-	if capturedVersion == "" {
+	if cVersion == "" {
 		t.Fatalf("missing anthropic-version header")
 	}
-	if capturedBody["model"] != "claude-3-5-sonnet-20240620" {
-		t.Fatalf("expected model in upstream body, got %v", capturedBody["model"])
+	if cBody["model"] != "claude-3-5-sonnet-20240620" {
+		t.Fatalf("expected model in upstream body, got %v", cBody["model"])
 	}
-	if capturedBody["system"] != "be brief" {
-		t.Fatalf("expected system hoisted, got %v", capturedBody["system"])
+	if cBody["system"] != "be brief" {
+		t.Fatalf("expected system hoisted, got %v", cBody["system"])
 	}
-	msgs, ok := capturedBody["messages"].([]any)
+	msgs, ok := cBody["messages"].([]any)
 	if !ok || len(msgs) != 1 {
-		t.Fatalf("expected exactly one non-system message in Anthropic body, got %v", capturedBody["messages"])
+		t.Fatalf("expected exactly one non-system message in Anthropic body, got %v", cBody["messages"])
 	}
 
 	// Downstream response shape — should be OpenAI-compatible.
@@ -330,12 +338,15 @@ func TestServeChatCompletions_AnthropicTranslation(t *testing.T) {
 // Gemini-out → OpenAI-back round-trip against a fake Gemini
 // :generateContent endpoint.
 func TestServeChatCompletions_GeminiTranslation(t *testing.T) {
+	var mu sync.Mutex
 	var capturedPath, capturedKey string
 	var capturedBody map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		capturedPath = r.URL.Path
 		capturedKey = r.Header.Get("x-goog-api-key")
 		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte(`{
@@ -381,18 +392,22 @@ func TestServeChatCompletions_GeminiTranslation(t *testing.T) {
 	}
 
 	// Upstream shape — native Gemini.
-	if !strings.HasSuffix(capturedPath, "/v1beta/models/gemini-1.5-pro:generateContent") {
-		t.Fatalf("expected gemini generateContent path, got %s", capturedPath)
+	mu.Lock()
+	cPath, cKey := capturedPath, capturedKey
+	cBody := capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1beta/models/gemini-1.5-pro:generateContent") {
+		t.Fatalf("expected gemini generateContent path, got %s", cPath)
 	}
-	if capturedKey != "gk-test" {
-		t.Fatalf("expected x-goog-api-key=gk-test, got %q", capturedKey)
+	if cKey != "gk-test" {
+		t.Fatalf("expected x-goog-api-key=gk-test, got %q", cKey)
 	}
-	sys, _ := capturedBody["systemInstruction"].(map[string]any)
+	sys, _ := cBody["systemInstruction"].(map[string]any)
 	if sys == nil {
-		t.Fatalf("expected systemInstruction in body, got %v", capturedBody)
+		t.Fatalf("expected systemInstruction in body, got %v", cBody)
 	}
-	if _, ok := capturedBody["contents"]; !ok {
-		t.Fatalf("expected contents key in gemini body, got %v", capturedBody)
+	if _, ok := cBody["contents"]; !ok {
+		t.Fatalf("expected contents key in gemini body, got %v", cBody)
 	}
 
 	// Downstream response shape — OpenAI compatible.
