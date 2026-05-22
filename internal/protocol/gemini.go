@@ -10,12 +10,12 @@ import (
 // :generateContent / :streamGenerateContent.
 
 type geminiRequest struct {
-	Contents          []geminiContent       `json:"contents"`
-	SystemInstruction *geminiContent        `json:"systemInstruction,omitempty"`
-	Tools             []geminiTool          `json:"tools,omitempty"`
-	ToolConfig        *geminiToolConfig     `json:"toolConfig,omitempty"`
-	GenerationConfig  *geminiGenConfig      `json:"generationConfig,omitempty"`
-	SafetySettings    []map[string]any      `json:"safetySettings,omitempty"`
+	Contents          []geminiContent   `json:"contents"`
+	SystemInstruction *geminiContent    `json:"systemInstruction,omitempty"`
+	Tools             []geminiTool      `json:"tools,omitempty"`
+	ToolConfig        *geminiToolConfig `json:"toolConfig,omitempty"`
+	GenerationConfig  *geminiGenConfig  `json:"generationConfig,omitempty"`
+	SafetySettings    []map[string]any  `json:"safetySettings,omitempty"`
 }
 
 type geminiContent struct {
@@ -24,11 +24,11 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
-	Text             string                 `json:"text,omitempty"`
-	InlineData       *geminiInlineData      `json:"inlineData,omitempty"`
-	FileData         *geminiFileData        `json:"fileData,omitempty"`
-	FunctionCall     *geminiFunctionCall    `json:"functionCall,omitempty"`
-	FunctionResponse *geminiFunctionResp    `json:"functionResponse,omitempty"`
+	Text             string              `json:"text,omitempty"`
+	InlineData       *geminiInlineData   `json:"inlineData,omitempty"`
+	FileData         *geminiFileData     `json:"fileData,omitempty"`
+	FunctionCall     *geminiFunctionCall `json:"functionCall,omitempty"`
+	FunctionResponse *geminiFunctionResp `json:"functionResponse,omitempty"`
 }
 
 type geminiInlineData struct {
@@ -88,9 +88,9 @@ type geminiResponse struct {
 }
 
 type geminiCandidate struct {
-	Content      geminiContent  `json:"content"`
-	FinishReason string         `json:"finishReason,omitempty"`
-	Index        int            `json:"index"`
+	Content       geminiContent    `json:"content"`
+	FinishReason  string           `json:"finishReason,omitempty"`
+	Index         int              `json:"index"`
 	SafetyRatings []map[string]any `json:"safetyRatings,omitempty"`
 }
 

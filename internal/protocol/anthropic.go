@@ -49,7 +49,7 @@ type anthropicContentBlock struct {
 }
 
 type anthropicSource struct {
-	Type      string `json:"type"`       // "base64" or "url"
+	Type      string `json:"type"` // "base64" or "url"
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`

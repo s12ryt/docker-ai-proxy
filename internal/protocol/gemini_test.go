@@ -130,10 +130,10 @@ func TestGeminiChat_RoleMapping(t *testing.T) {
 
 func TestGeminiChat_ToolChoiceModes(t *testing.T) {
 	cases := []struct {
-		ir         *ToolChoice
-		mode       string
-		allowed    bool
-		allowedFn  string
+		ir        *ToolChoice
+		mode      string
+		allowed   bool
+		allowedFn string
 	}{
 		{&ToolChoice{Mode: "auto"}, "AUTO", false, ""},
 		{&ToolChoice{Mode: "required"}, "ANY", false, ""},

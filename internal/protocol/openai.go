@@ -47,8 +47,8 @@ type openAIInputMessage struct {
 }
 
 type openAIToolCal struct {
-	ID       string                `json:"id"`
-	Type     string                `json:"type"`
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
 	Function openAIToolCallFunction `json:"function"`
 }
 
@@ -58,7 +58,7 @@ type openAIToolCallFunction struct {
 }
 
 type openAITool struct {
-	Type     string            `json:"type"`
+	Type     string             `json:"type"`
 	Function openAIToolFunction `json:"function"`
 }
 
@@ -80,10 +80,10 @@ type openAIJSONSchemaFormat struct {
 }
 
 type openAIContentPart struct {
-	Type       string                 `json:"type"`
-	Text       string                 `json:"text,omitempty"`
-	ImageURL   *openAIImageURL        `json:"image_url,omitempty"`
-	InputAudio *openAIInputAudio      `json:"input_audio,omitempty"`
+	Type       string            `json:"type"`
+	Text       string            `json:"text,omitempty"`
+	ImageURL   *openAIImageURL   `json:"image_url,omitempty"`
+	InputAudio *openAIInputAudio `json:"input_audio,omitempty"`
 }
 
 type openAIImageURL struct {
@@ -481,8 +481,8 @@ func EncodeOpenAIResponse(resp ChatResponse) ([]byte, error) {
 		// Always emit at least one choice — downstream OpenAI SDKs
 		// trip on an empty array.
 		out.Choices = []openAIChoice{{
-			Index: 0,
-			Message: openAIRespMsg{Role: RoleAssistant},
+			Index:        0,
+			Message:      openAIRespMsg{Role: RoleAssistant},
 			FinishReason: openAIFinishFromIR("", resp.StopReason),
 		}}
 	}

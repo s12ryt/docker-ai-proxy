@@ -151,10 +151,10 @@ func TestOpenAIChat_ToolCallsRoundTrip(t *testing.T) {
 
 func TestOpenAIChat_ToolChoice(t *testing.T) {
 	cases := map[string]string{
-		`"auto"`:                                                      "auto",
-		`"none"`:                                                      "none",
-		`"required"`:                                                  "required",
-		`{"type":"function","function":{"name":"my_tool"}}`:           "specific",
+		`"auto"`:     "auto",
+		`"none"`:     "none",
+		`"required"`: "required",
+		`{"type":"function","function":{"name":"my_tool"}}`: "specific",
 	}
 	for raw, mode := range cases {
 		in := []byte(`{"model":"x","messages":[{"role":"user","content":"a"}],"tool_choice":` + raw + `}`)

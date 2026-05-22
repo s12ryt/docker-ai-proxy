@@ -84,7 +84,7 @@ func TestAnthropicChat_RoundTrip_WithImage(t *testing.T) {
 
 func TestAnthropicChat_DefaultMaxTokens(t *testing.T) {
 	body, err := EncodeAnthropicChat(ChatRequest{
-		Model: "claude",
+		Model:    "claude",
 		Messages: []Message{{Role: RoleUser, Content: []Part{TextPart("hi")}}},
 	})
 	if err != nil {
@@ -235,7 +235,7 @@ func TestAnthropicChat_ToolMessageBecomesUser(t *testing.T) {
 			Role:       RoleTool,
 			ToolCallID: "toolu_1",
 			Content: []Part{{
-				Type: PartToolResult,
+				Type:       PartToolResult,
 				ToolResult: &ToolResult{ToolUseID: "toolu_1", Content: "42"},
 			}},
 		}},
