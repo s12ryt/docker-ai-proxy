@@ -209,3 +209,271 @@ func TestServeChatCompletions_UpstreamError(t *testing.T) {
 		t.Fatalf("body not passed through: %s", b)
 	}
 }
+
+// TestServeChatCompletions_AnthropicTranslation verifies the OpenAI-in →
+// Anthropic-out → OpenAI-back round-trip works against a fake Anthropic
+// /v1/messages endpoint.
+func TestServeChatCompletions_AnthropicTranslation(t *testing.T) {
+	var capturedPath, capturedKey, capturedVersion string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		capturedKey = r.Header.Get("x-api-key")
+		capturedVersion = r.Header.Get("anthropic-version")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		// Reply with a minimal Anthropic /v1/messages response.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{
+			"id":"msg_test",
+			"type":"message",
+			"role":"assistant",
+			"model":"claude-3-5-sonnet-20240620",
+			"content":[{"type":"text","text":"hello from claude"}],
+			"stop_reason":"end_turn",
+			"usage":{"input_tokens":7,"output_tokens":3}
+		}`))
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	st, err := store.OpenSQLite(filepath.Join(tmp, "anthropic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "anthropic", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"ak-test"},
+		Models:     []string{"claude-3-5-sonnet-20240620"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, st)
+
+	body := bytes.NewBufferString(`{
+		"model":"claude-3-5-sonnet-20240620",
+		"messages":[
+			{"role":"system","content":"be brief"},
+			{"role":"user","content":"hi"}
+		],
+		"max_tokens": 64
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	rec := httptest.NewRecorder()
+	p.ServeChatCompletions(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Upstream request shape — should be native Anthropic.
+	if !strings.HasSuffix(capturedPath, "/v1/messages") {
+		t.Fatalf("expected /v1/messages, got %s", capturedPath)
+	}
+	if capturedKey != "ak-test" {
+		t.Fatalf("expected x-api-key=ak-test, got %q", capturedKey)
+	}
+	if capturedVersion == "" {
+		t.Fatalf("missing anthropic-version header")
+	}
+	if capturedBody["model"] != "claude-3-5-sonnet-20240620" {
+		t.Fatalf("expected model in upstream body, got %v", capturedBody["model"])
+	}
+	if capturedBody["system"] != "be brief" {
+		t.Fatalf("expected system hoisted, got %v", capturedBody["system"])
+	}
+	msgs, ok := capturedBody["messages"].([]any)
+	if !ok || len(msgs) != 1 {
+		t.Fatalf("expected exactly one non-system message in Anthropic body, got %v", capturedBody["messages"])
+	}
+
+	// Downstream response shape — should be OpenAI-compatible.
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["object"] != "chat.completion" {
+		t.Fatalf("expected object=chat.completion, got %v", resp["object"])
+	}
+	if resp["model"] != "claude-3-5-sonnet-20240620" {
+		t.Fatalf("expected model=claude-3-5-sonnet-20240620, got %v", resp["model"])
+	}
+	choices, _ := resp["choices"].([]any)
+	if len(choices) == 0 {
+		t.Fatalf("expected at least one choice, got %v", resp["choices"])
+	}
+	first, _ := choices[0].(map[string]any)
+	msg, _ := first["message"].(map[string]any)
+	if !strings.Contains(toStringForTest(msg["content"]), "hello from claude") {
+		t.Fatalf("expected translated content, got %v", msg["content"])
+	}
+	if first["finish_reason"] != "stop" {
+		t.Fatalf("expected finish_reason=stop, got %v", first["finish_reason"])
+	}
+
+	if got := rec.Header().Get("X-AI-Hub-Provider"); got != "anthropic" {
+		t.Fatalf("expected provider header anthropic, got %q", got)
+	}
+
+	rows, err := st.RecentCalls(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Status != 200 || rows[0].Provider != "anthropic" {
+		t.Fatalf("bad log: %+v", rows)
+	}
+}
+
+// TestServeChatCompletions_GeminiTranslation verifies the OpenAI-in →
+// Gemini-out → OpenAI-back round-trip against a fake Gemini
+// :generateContent endpoint.
+func TestServeChatCompletions_GeminiTranslation(t *testing.T) {
+	var capturedPath, capturedKey string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		capturedKey = r.Header.Get("x-goog-api-key")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{
+			"candidates":[{
+				"content":{"role":"model","parts":[{"text":"hello from gemini"}]},
+				"finishReason":"STOP",
+				"index":0
+			}],
+			"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":4,"totalTokenCount":9}
+		}`))
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	st, err := store.OpenSQLite(filepath.Join(tmp, "gemini.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "gemini", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"gk-test"},
+		Models:     []string{"gemini-1.5-pro"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, st)
+
+	body := bytes.NewBufferString(`{
+		"model":"gemini-1.5-pro",
+		"messages":[
+			{"role":"system","content":"act as poet"},
+			{"role":"user","content":"hi"}
+		]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	rec := httptest.NewRecorder()
+	p.ServeChatCompletions(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Upstream shape — native Gemini.
+	if !strings.HasSuffix(capturedPath, "/v1beta/models/gemini-1.5-pro:generateContent") {
+		t.Fatalf("expected gemini generateContent path, got %s", capturedPath)
+	}
+	if capturedKey != "gk-test" {
+		t.Fatalf("expected x-goog-api-key=gk-test, got %q", capturedKey)
+	}
+	sys, _ := capturedBody["systemInstruction"].(map[string]any)
+	if sys == nil {
+		t.Fatalf("expected systemInstruction in body, got %v", capturedBody)
+	}
+	if _, ok := capturedBody["contents"]; !ok {
+		t.Fatalf("expected contents key in gemini body, got %v", capturedBody)
+	}
+
+	// Downstream response shape — OpenAI compatible.
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["object"] != "chat.completion" {
+		t.Fatalf("expected object=chat.completion, got %v", resp["object"])
+	}
+	if resp["model"] != "gemini-1.5-pro" {
+		t.Fatalf("expected model=gemini-1.5-pro, got %v", resp["model"])
+	}
+	choices, _ := resp["choices"].([]any)
+	if len(choices) == 0 {
+		t.Fatalf("expected at least one choice, got %v", resp["choices"])
+	}
+	first, _ := choices[0].(map[string]any)
+	msg, _ := first["message"].(map[string]any)
+	if !strings.Contains(toStringForTest(msg["content"]), "hello from gemini") {
+		t.Fatalf("expected translated content, got %v", msg["content"])
+	}
+	if first["finish_reason"] != "stop" {
+		t.Fatalf("expected finish_reason=stop, got %v", first["finish_reason"])
+	}
+	usage, _ := resp["usage"].(map[string]any)
+	if usage == nil || toIntForTest(usage["total_tokens"]) != 9 {
+		t.Fatalf("expected usage.total_tokens=9, got %v", resp["usage"])
+	}
+}
+
+// TestServeChatCompletions_AnthropicStreamingRejected ensures streaming for
+// non-OpenAI providers is explicitly rejected for now (Stage 4 will lift it).
+func TestServeChatCompletions_AnthropicStreamingRejected(t *testing.T) {
+	tmp := t.TempDir()
+	st, _ := store.OpenSQLite(filepath.Join(tmp, "stream.db"))
+	defer st.Close()
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "anthropic", Enabled: true,
+		BaseURL:    "https://unused.invalid",
+		APIKeys:    []string{"k"},
+		Models:     []string{"claude-3-5-sonnet-20240620"},
+		TimeoutSec: 5,
+	}}}
+	p := New(cfg, st)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"claude-3-5-sonnet-20240620","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	p.ServeChatCompletions(rec, req)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func toStringForTest(v any) string {
+	switch s := v.(type) {
+	case string:
+		return s
+	case []any:
+		var b strings.Builder
+		for _, p := range s {
+			if m, ok := p.(map[string]any); ok {
+				if t, ok := m["text"].(string); ok {
+					b.WriteString(t)
+				}
+			}
+		}
+		return b.String()
+	default:
+		return ""
+	}
+}
+
+func toIntForTest(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	}
+	return 0
+}

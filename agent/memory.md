@@ -203,3 +203,115 @@
 2. 寫 commit：`fix: harden concurrency, SSE headers, client timeouts, per-provider key rotation`。
 3. push 觸發 CI；到 GitHub Actions 看 `ci.yml` 結果。
 4. 若 CI 失敗多半是 `gofmt -l .` 抓到 tab/space 不一致，本機沒 Go 沒辦法預跑，靠 CI 回報後修。
+
+
+---
+
+## 2026-05-22 · 多協定接入 Stage 1 + Stage 2(OpenAI/Anthropic/Gemini 雙向轉換)
+
+### 需求
+
+使用者:「請你幫我新增對各種ai-api協議(claude和google還有openai的各種協議)的接入及轉出」。
+
+確認後範圍:
+1. 3x3 入站 x 出站矩陣(OpenAI / Anthropic / Gemini)
+2. 完整 SSE 雙向翻譯(Stage 4 才做)
+3. OpenAI 全套端點:embeddings / images / audio / completions(Stage 5+6)
+
+7-Stage 規劃:
+- **Stage 1**:`internal/protocol/` IR + 3 家雙向轉換純函數 + 單元測試(不改現有路徑) [DONE]
+- **Stage 2**:重構 `proxy.ServeChatCompletions` 走 IR;OpenAI/DeepSeek pass-through 快路徑 [DONE](本次未串流;串流 Stage 4)
+- Stage 3:新增 `/v1/messages` 與 `/v1beta/models/{model}:generateContent` 入站路由
+- Stage 4:SSE 統一事件流 + 三家解析器/發射器 + e2e 測試
+- Stage 5:`/v1/embeddings` + `/v1/completions`
+- Stage 6:`/v1/images/*` + `/v1/audio/*`(暫 OpenAI 出站)
+- Stage 7:README + agent/* 文件更新
+
+### Stage 1 internal/protocol/ IR(commit `5e54219` + style fix `75bd1f5`)
+
+新增 7 個檔(全屬 package `protocol`):
+
+**`types.go`** IR 結構:
+- 常量族:`Role*`(system/user/assistant/tool)、`Part*`(text/image/audio/tool_use/tool_result)、`StopReason*`(stop/length/tool_calls/content_filter/error)
+- `ChatRequest{Model, System, Messages[], MaxTokens, Temperature*float64, TopP*float64, Stop[]string, Stream, StreamUsage, Tools[], ToolChoice*, ResponseFmt*, Extra map[string]any}`
+- `Message{Role, Name, Content []Part, ToolCallID, ToolCalls[]ToolCall}`
+- `Part{Type, Text, URL, Data, MediaType, ToolUse*, ToolResult*}`
+- `Tool{Name, Description, Parameters map[string]any}`、`ToolChoice{Mode, Name}`、`ResponseFormat{Type, Schema, SchemaName, Strict}`
+- `ChatResponse{ID, Model, Created, Choices, Usage, StopReason}`、`Choice{Index, Message, StopReason, LogProbs, NativeFinish}`、`Usage{Prompt/Completion/TotalTokens}`
+- helper:`TextPart(s)`、`FloatPtr(v)`、`MessageText(m)`、`HasNonTextContent(m)`
+
+**`openai.go`** `DecodeOpenAIChat/EncodeOpenAIChat/DecodeOpenAIResponse/EncodeOpenAIResponse` + 共用 helper。
+- 重點:system + developer role 都 hoist 到 IR.System(以 `\n` 串接);accepts both string 與 array content forms;tool role 對應 `PartToolResult`;N/Seed/User/FrequencyPenalty/PresencePenalty/LogProbs/TopLogProbs 存到 Extra 不丟失;空 choices 補一個避免 SDK 砸。
+
+**`anthropic.go`** `DecodeAnthropicChat/EncodeAnthropicChat/DecodeAnthropicResponse/EncodeAnthropicResponse`。
+- `MaxTokens` 預設 4096(Anthropic 必填);system 接受 string 或 blocks 陣列;image 同時支援 base64+media_type 與 url;tool_choice 對應 auto/any/none/tool;stop_reason 對應 end_turn/max_tokens/tool_use。`RoleTool` 訊息會展平為 user-with-tool_result 區塊。
+
+**`gemini.go`** `DecodeGeminiChat/EncodeGeminiChat/DecodeGeminiResponse/EncodeGeminiResponse`。
+- Role 映射:user<->user、assistant<->model、tool<->function
+- `functionCall` / `functionResponse` 用 synthetic ID `call_<name>` 保留 ToolUseID 對應
+- finish_reason:STOP/MAX_TOKENS/SAFETY/RECITATION/BLOCKLIST/PROHIBITED_CONTENT/SPII
+- `sanitiseGeminiSchema` 遞迴剔除 `\`\`\`/`\`\`\`/`definitions`/`\`\`\`/`additionalProperties`(Gemini schema 不認)
+- `responseMimeType=application/json` 對應 IR `ResponseFmt.json_object|json_schema`
+
+**3 份 *_test.go** 共 30+ 子測試,覆蓋 round-trip / system hoist / data URL image / tool calls / tool choice 4 模式 / finish reason mapping / 空 choices padding / schema sanitiser 等。
+
+### Stage 1 commit & gofmt 踩坑
+
+- commit `5e54219` push 後 CI 在 `gofmt -l .` 失敗;CI 沒貼出哪些檔。
+- 本機無 Go 無 Docker -> 用 **play.golang.org/fmt POST API** 線上批次格式化。
+- **踩坑**:首次用 `Invoke-WebRequest` 造成 em-dash(0xE2 0x80 0x94)被誤認為 ISO-8859-1 寫壞檔。`git checkout --` 回滾後改用 `System.Net.Http.HttpClient` + `UTF8Encoding(false)` POST,並以 `[System.IO.File]::WriteAllText(..., UTF8Encoding(false))` 寫回。
+- 結果:6 個檔被 gofmt 修(struct field 對齊,純 cosmetic,+34/-34 行),commit `75bd1f5` 「style: apply gofmt to internal/protocol」。CI 全綠。
+- **教訓**:後續 Stage 2-7 新增/修改 Go 檔都該跑同一個批次線上 gofmt 再 push,避免兩段 commit。
+
+### Stage 2 proxy.ServeChatCompletions 走 IR
+
+新增檔 `internal/proxy/translate.go`(181 行)。重寫 `internal/proxy/proxy.go`(+144/-18)。
+
+**`translate.go`** API:
+- `type providerKind int`、`kindOpenAI / kindAnthropic / kindGemini`、`String()`
+- `providerKindOf(p config.Provider) providerKind` 優先以 name(anthropic/claude/gemini/google/googleai/vertex)判斷,其次 baseURL(`anthropic.com` / `generativelanguage.googleapis.com` / `aiplatform.googleapis.com`),default openai
+- `upstreamPathForChat(kind, model, stream)`:
+  - anthropic -> `/v1/messages`
+  - gemini -> `/v1beta/models/{model}:generateContent`(stream:true 改 `:streamGenerateContent`)
+  - default -> `/v1/chat/completions`
+- `translateChatRequest(srcBody []byte, dst providerKind, upstreamModel string) ([]byte, protocol.ChatRequest, error)` `DecodeOpenAIChat` -> 改 ir.Model -> 依 dst Encode
+- `translateChatResponse(src providerKind, requestModel string, upstreamBody []byte) ([]byte, error)` anthropic/gemini decode -> `fillDefaultsForOpenAIResponse` -> `EncodeOpenAIResponse`;default 直接 pass-through bytes
+- `fillDefaultsForOpenAIResponse`:補 `chatcmpl-<randomID(24)>`、`Created=time.Now().Unix()`、`Model=requestModel`
+- `randomID(n)` base36 從 UnixNano 拼,不靠 `crypto/rand`(避免新依賴)
+
+**`proxy.go` 重構**:
+- `buildUpstreamRequest`:
+  - case `anthropic`/`claude`:若 path 是 `""` 或 `/v1/chat/completions` 才覆寫為 `/v1/messages`;否則原樣(為 Stage 5/6 預留)。加 `x-api-key` + `anthropic-version`。
+  - case `gemini`/`google`/`googleai`/`vertex`:加 `x-goog-api-key`,**刪除 hard-code 路徑**,改成 `base + path` 由 caller(`upstreamPathForChat`)控制。原本走 `/v1beta/openai/chat/completions` 的 OpenAI 相容 shim 不再使用。
+  - default:不變(Bearer auth)
+- `ServeChatCompletions` 分流:
+  - kindOpenAI -> pass-through 快路徑:`payload["model"]=upstreamModel` + `json.Marshal` -> `serveStreamThrough`(維持串流低延遲)
+  - kindAnthropic/kindGemini + stream=true -> `writeJSONError(501, "streaming for X providers is not yet supported, set stream=false")`
+  - kindAnthropic/kindGemini + stream=false -> `translateChatRequest` -> 全 buffer 上游 -> `serveTranslatedChatResponse`
+- 抽出兩個 helper:
+  - `serveStreamThrough(w, resp, providerName, stream, *rec)`:複製 header(跳 hop-by-hop)、SSE 三件套、32KB 讀寫迴圈 + flusher、處理 ShortWrite/Canceled/EOF。
+  - `serveTranslatedChatResponse(w, resp, kind, requestModel, providerName, *rec)`:buffer ReadAll(LimitReader maxRequestBytes);若非 2xx -> 原樣 pass-through(保留原廠 error envelope);2xx -> translate -> `Content-Type: application/json` + 200 + 譯後 body。
+
+### Stage 2 e2e 測試(proxy_test.go 211 -> 479 行)
+
+新增 3 個測試 + 2 個 helper:
+
+1. **`TestServeChatCompletions_AnthropicTranslation`** fake upstream 收 path/x-api-key/anthropic-version + body,回 Anthropic `/v1/messages` minimal response。送 OpenAI 請求(system+user+max_tokens=64)。驗證:status=200、capturedPath 含 `/v1/messages`、headers 正確、body.model=claude...、body.system='be brief'、body.messages 只剩 user(system 被 hoist)、resp.object=`chat.completion`、resp.model=claude...、content 含 'hello from claude'、finish_reason=stop、`X-AI-Hub-Provider=anthropic`、`store.RecentCalls` 錄 1 條 status=200。
+2. **`TestServeChatCompletions_GeminiTranslation`** fake upstream 收 path/x-goog-api-key + body,回 Gemini response(STOP + usageMetadata)。驗證:capturedPath 含 `/v1beta/models/gemini-1.5-pro:generateContent`、`x-goog-api-key=gk-test`、body.systemInstruction 非 nil、body.contents 存在、resp 經 OpenAI envelope 包裝、content 含 'hello from gemini'、finish_reason=stop、usage.total_tokens=9。
+3. **`TestServeChatCompletions_AnthropicStreamingRejected`** stream=true + anthropic provider -> 501。
+4. `toStringForTest`/`toIntForTest` helper 處理 `message.content` 可能是 string 或 `[{type:text,text:...}]` 陣列;number 處理 float64/int/int64。
+
+### Stage 2 設計重點
+
+1. **OpenAI/DeepSeek 走快路徑不過 IR**:測試已驗證 echo 後 `got["model"]=upstreamModel`;保留串流低延遲與 byte-perfect 透傳。避免「翻譯一次再翻譯回來」的無謂 round-trip。
+2. **非串流路徑 buffer 整個 upstream body**:Anthropic/Gemini chat completion 非串流回應一般 < 1MB,buffer 風險可接受,換來簡單清晰的翻譯邏輯。串流 Stage 4 才會搬 SSE 事件解析。
+3. **`upstreamPathForChat` 為何不放 `buildUpstreamRequest`**:路徑決策需要知道 model+stream,而 `buildUpstreamRequest` 是 path-agnostic(path 由 caller 傳入)。讓 ServeChatCompletions 控制路徑,後續新端點(messages/embeddings/images)能各自決定。
+4. **fillDefaultsForOpenAIResponse 補 ID 是必要的**:Anthropic `id=msg_abc...`,Gemini 無 ID 欄位;OpenAI SDK 期待 `chatcmpl-...` 前綴,直接照原 ID 給的話有 SDK 會反射報錯。
+5. **buildUpstreamRequest 對 anthropic path 的條件覆寫**:Stage 5 加 `/v1/messages` 入站時,proxy 要能透傳 anthropic 原生路徑,所以只有「OpenAI 預設路徑」才覆寫為 `/v1/messages`,其他路徑原樣。
+6. **gemini 不再走 OpenAI 相容 shim**:之前 `/v1beta/openai/chat/completions` 是 Google 的 beta shim,有 model 名稱限制;改走 `:generateContent` 原生端點更全功能(支援 functionCalling、responseSchema、safetySettings 等)。
+
+### 已知不修 / 留 Stage 4 解
+
+- **Anthropic/Gemini 串流 SSE 翻譯**:目前 stream=true 直接 501。Stage 4 會做事件層級雙向翻譯(`message_delta` <-> `content.delta`)。
+- **token usage 計數**:Anthropic 回 `input_tokens`/`output_tokens`,Gemini 回 `promptTokenCount`/`candidatesTokenCount`,目前 `translateChatResponse` 已經透過 IR 映射到 `Usage`,所以 `chat.completion` 回應內 `usage` 欄位是準的。但 `store.LogCall` 內 `BytesIn/BytesOut` 還沒換成 token,deep_todos P2 持續觀察。
+- **deep_todos.md「Anthropic 真支援」項描述需更新**:非串流已 OK,只剩串流。可改寫為「串流 SSE 反向翻譯」。

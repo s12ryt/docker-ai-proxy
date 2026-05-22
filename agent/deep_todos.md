@@ -28,6 +28,27 @@
 - [x] **P1** `dialect_test.go` 含 9 + 6 + 3 + 1 + 2 + 1 + 1 個子測試覆蓋 driver alias / rebind / DSN 解析
 - [x] **P1** docker-compose / README / config.example.json 範例與文件更新
 
+## 已完成 (多協定接入 Stage 1 + Stage 2 · 2026-05-22)
+
+使用者需求：「新增對各種 ai-api 協議（claude / google / openai）的接入及轉出」。
+規劃 7 階段，本次完成前兩階段。
+
+### Stage 1 · 中介 IR + 三家雙向轉換純函數（不改現有路徑）
+- [x] `internal/protocol/types.go` — IR：`ChatRequest` / `Message` / `Part` / `Tool` / `ToolChoice` / `ResponseFormat` / `ChatResponse` 等；Part 涵蓋 text/image/audio/tool_use/tool_result；stop reason 抽象（stop/length/tool_calls/content_filter/error）
+- [x] `internal/protocol/openai.go` — OpenAI ↔ IR；hoist system + developer 角色、tool_calls / tool 訊息互轉、image/audio dataURL 解析、N/Seed/User/FreqPen/PresPen/LogProbs 走 Extra
+- [x] `internal/protocol/anthropic.go` — Anthropic /v1/messages ↔ IR；system string|array、tool_use/tool_result、tool_choice (auto/any/none/tool)、stop_reason (end_turn/max_tokens/tool_use)、MaxTokens 預設 4096
+- [x] `internal/protocol/gemini.go` — Gemini :generateContent ↔ IR；functionCall/functionResponse with synthetic ID `call_<name>`、finish reason (STOP/MAX_TOKENS/SAFETY/RECITATION/BLOCKLIST/PROHIBITED_CONTENT/SPII)、`sanitiseGeminiSchema` 剔除 $schema/$id/definitions/$defs/additionalProperties
+- [x] 三份 *_test.go — 全覆蓋 round-trip / system hoist / image / tool / finish 對應 / schema sanitiser
+- commits: `5e54219` (feat) + `75bd1f5` (gofmt)
+
+### Stage 2 · 重構 /v1/chat/completions 走 IR（OpenAI pass-through、Anthropic/Gemini 非流式翻譯）
+- [x] `internal/proxy/translate.go` — `providerKindOf(p)` (name 主 / baseURL 次)、`upstreamPathForChat(kind, model, stream)` (anthropic→/v1/messages、gemini→/v1beta/models/{model}:generateContent[或 streamGenerateContent])、`translateChatRequest` (decode OpenAI → IR → encode dst native)、`translateChatResponse` (decode native → IR → 補 ID/Created/Model → encode OpenAI)、`fillDefaultsForOpenAIResponse` + `randomID`
+- [x] `proxy.buildUpstreamRequest` 重構 — anthropic/claude 強制 path=/v1/messages、gemini/google/googleai/vertex 走 base+path（由 caller 帶入完整 `:generateContent` 路徑）
+- [x] `proxy.ServeChatCompletions` 重構 — 依 providerKind 分支：OpenAI pass-through（payload["model"]=upstreamModel + json.Marshal）；Anthropic/Gemini 走 translateChatRequest 並全 buffer 上游回應後翻譯回 OpenAI；非 2xx 一律 pass-through 保留原廠 error envelope
+- [x] 抽出 `serveStreamThrough`（沿用既有 32KB SSE 邏輯）與 `serveTranslatedChatResponse`（buffer + translate + write）
+- [x] 暫拒非 OpenAI 串流請求：anthropic/gemini + stream=true → 501（Stage 4 補上）
+- [x] 新增 e2e 測試 `TestServeChatCompletions_AnthropicTranslation` / `TestServeChatCompletions_GeminiTranslation` / `TestServeChatCompletions_AnthropicStreamingRejected` 用 fake upstream 驗證雙向翻譯與 header/path
+
 ## 已完成 (第二輪 bug 排查 · 2026-05-22)
 
 逐檔過完整 codebase，找出 18 個潛在 bug，修了 14 個（剩下 2 個 P2 + 1 個 P3 評估後不修）。詳見 memory.md 對應段落。

@@ -58,6 +58,16 @@ func New(cfg *config.Config, st *store.Store) *Proxy {
 }
 
 // ServeChatCompletions handles `/v1/chat/completions` requests in OpenAI format.
+//
+// The handler classifies the resolved upstream provider into one of three wire
+// protocols (OpenAI / Anthropic / Gemini) and either streams the response
+// verbatim (OpenAI-compatible upstreams) or runs a request/response
+// translation through internal/protocol (Anthropic, Gemini).
+//
+// Streaming for Anthropic/Gemini is parked until Stage 4 of the protocol-bridge
+// roadmap. Until then we honour stream=true only for OpenAI-compatible
+// upstreams and reject it with 501 for the other vendors so clients receive a
+// clear, non-buffered error instead of a silently incomplete reply.
 func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -76,32 +86,53 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	modelRaw, _ := payload["model"].(string)
-	modelRaw = strings.TrimSpace(modelRaw)
-	if modelRaw == "" {
+	requestedModel, _ := payload["model"].(string)
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing 'model'")
 		return
 	}
 
-	provider, model, err := p.cfg.ProviderForModel(modelRaw)
+	provider, upstreamModel, err := p.cfg.ProviderForModel(requestedModel)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	// Replace model name with provider-native form before forwarding.
-	payload["model"] = model
-	outBody, err := json.Marshal(payload)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "marshal payload: "+err.Error())
-		return
-	}
+	kind := providerKindOf(provider)
 	stream, _ := payload["stream"].(bool)
+
+	// Build the outbound payload. For OpenAI-style providers we keep the
+	// original body shape but swap in the provider-native model name. For
+	// Anthropic/Gemini we go through the IR translator.
+	var outBody []byte
+	switch kind {
+	case kindOpenAI:
+		payload["model"] = upstreamModel
+		outBody, err = json.Marshal(payload)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "marshal payload: "+err.Error())
+			return
+		}
+	case kindAnthropic, kindGemini:
+		if stream {
+			// Real SSE translation lands in Stage 4. Surface a clear
+			// error rather than silently returning a non-stream body
+			// — the OpenAI SDK will hang waiting for events otherwise.
+			writeJSONError(w, http.StatusNotImplemented,
+				"streaming for "+kind.String()+" providers is not yet supported; set \"stream\": false")
+			return
+		}
+		outBody, _, err = translateChatRequest(body, kind, upstreamModel)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	rec := store.CallRecord{
 		Timestamp: time.Now(),
 		Provider:  provider.Name,
-		Model:     model,
+		Model:     upstreamModel,
 		Path:      r.URL.Path,
 		BytesIn:   int64(len(body)),
 		ClientIP:  clientIP(r),
@@ -122,7 +153,8 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 		_ = p.store.LogCall(ctx, rec)
 	}()
 
-	upstreamURL, headers, err := buildUpstreamRequest(provider, "/v1/chat/completions", p.picker.Pick(provider))
+	upstreamPath := upstreamPathForChat(kind, upstreamModel, stream)
+	upstreamURL, headers, err := buildUpstreamRequest(provider, upstreamPath, p.picker.Pick(provider))
 	if err != nil {
 		rec.Status = http.StatusBadGateway
 		rec.ErrMessage = err.Error()
@@ -157,6 +189,21 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// Anthropic/Gemini non-stream: buffer the full body and translate it
+	// back to OpenAI chat-completion shape before responding.
+	if kind == kindAnthropic || kind == kindGemini {
+		p.serveTranslatedChatResponse(w, resp, kind, requestedModel, provider.Name, &rec)
+		return
+	}
+
+	// OpenAI / DeepSeek / any OAI-compatible upstream: stream through.
+	p.serveStreamThrough(w, resp, provider.Name, stream, &rec)
+}
+
+// serveStreamThrough copies the upstream response to the client verbatim,
+// flushing after every chunk. Used for OpenAI-compatible upstreams where the
+// wire format is already what the client expects.
+func (p *Proxy) serveStreamThrough(w http.ResponseWriter, resp *http.Response, providerName string, stream bool, rec *store.CallRecord) {
 	for k, vs := range resp.Header {
 		if isHopByHop(k) {
 			continue
@@ -165,7 +212,7 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 			w.Header().Add(k, v)
 		}
 	}
-	w.Header().Set("X-AI-Hub-Provider", provider.Name)
+	w.Header().Set("X-AI-Hub-Provider", providerName)
 
 	// Detect SSE either from the upstream Content-Type or the client's
 	// stream:true flag, and apply the anti-buffering headers that nginx /
@@ -218,6 +265,58 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 	rec.BytesOut = n
 }
 
+// serveTranslatedChatResponse buffers an Anthropic/Gemini response, runs it
+// through the IR translator and emits an OpenAI-shape body. Upstream non-2xx
+// responses are echoed verbatim with the original status code (so clients see
+// vendor error messages); only 2xx bodies go through translation.
+func (p *Proxy) serveTranslatedChatResponse(w http.ResponseWriter, resp *http.Response, kind providerKind, requestedModel, providerName string, rec *store.CallRecord) {
+	defer func() {
+		// resp.Body is closed by the caller's deferred Close, not here.
+	}()
+	upstreamBody, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBytes))
+	if err != nil {
+		rec.Status = http.StatusBadGateway
+		rec.ErrMessage = err.Error()
+		writeJSONError(w, http.StatusBadGateway, "read upstream: "+err.Error())
+		return
+	}
+
+	w.Header().Set("X-AI-Hub-Provider", providerName)
+
+	// Non-2xx: pass through. Vendor error envelopes are usable to clients
+	// even if they're not in OpenAI shape, and translating an error JSON
+	// could mask the original signal. We still strip hop-by-hop headers.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		for k, vs := range resp.Header {
+			if isHopByHop(k) {
+				continue
+			}
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		rec.Status = resp.StatusCode
+		n, _ := w.Write(upstreamBody)
+		rec.BytesOut = int64(n)
+		return
+	}
+
+	translated, err := translateChatResponse(kind, requestedModel, upstreamBody)
+	if err != nil {
+		rec.Status = http.StatusBadGateway
+		rec.ErrMessage = err.Error()
+		writeJSONError(w, http.StatusBadGateway, "translate response: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	rec.Status = http.StatusOK
+	n, _ := w.Write(translated)
+	rec.BytesOut = int64(n)
+}
+
 // ServeModels lists all enabled models across providers in OpenAI format.
 func (p *Proxy) ServeModels(w http.ResponseWriter, r *http.Request) {
 	type entry struct {
@@ -251,19 +350,28 @@ func buildUpstreamRequest(p config.Provider, path, apiKey string) (string, map[s
 	base := strings.TrimRight(p.BaseURL, "/")
 
 	switch strings.ToLower(p.Name) {
-	case "anthropic":
+	case "anthropic", "claude":
 		if apiKey == "" {
 			return "", nil, errors.New("anthropic provider missing api key")
 		}
 		headers["x-api-key"] = apiKey
 		headers["anthropic-version"] = "2023-06-01"
-		return base + "/v1/messages", headers, nil
-	case "gemini":
+		// If the caller passed an OpenAI-style path we still want to
+		// land on /v1/messages — that's the only endpoint Anthropic
+		// exposes for chat. Other Anthropic-style paths (e.g.
+		// /v1/complete) are honoured verbatim.
+		if path == "" || path == "/v1/chat/completions" {
+			path = "/v1/messages"
+		}
+		return base + path, headers, nil
+	case "gemini", "google", "googleai", "vertex":
 		if apiKey == "" {
 			return "", nil, errors.New("gemini provider missing api key")
 		}
 		headers["x-goog-api-key"] = apiKey
-		return base + "/v1beta/openai/chat/completions", headers, nil
+		// Gemini paths are computed by the caller (they embed the model
+		// name). Fall through to base + path.
+		return base + path, headers, nil
 	default:
 		if apiKey != "" {
 			headers["Authorization"] = "Bearer " + apiKey
