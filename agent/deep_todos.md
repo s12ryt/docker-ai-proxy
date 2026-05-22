@@ -66,6 +66,15 @@
 - [x] 串流接入：OpenAI 入站 `stream:true` → Anthropic/Gemini provider；Anthropic 入站 `stream:true` → 目標 provider；Gemini 入站 `:streamGenerateContent` → 目標 provider。
 - [x] 新增 fake upstream SSE e2e：`TestServeChatCompletions_AnthropicStreamingTranslation`、`TestServeAnthropicMessages_OpenAIStreamingUpstream`、`TestServeGeminiGenerateContent_OpenAIStreamingUpstream`。
 - [x] 本機 portable Go 驗證：`gofmt` + `go test -count=1 ./...` + `go vet ./...` 全通過（Windows 無 CGO，`-race` 仍由 CI Linux runner 驗證）。
+- [x] CI 驗證：`d86a6c7` 後 `ci.yml` 與 `docker-publish.yml` 全綠；Stage 4 完成。
+
+### Stage 5 · OpenAI embeddings/completions 端點
+- [x] `internal/proxy/proxy.go` 新增 `ServeEmbeddings`：OpenAI-compatible provider pass-through 到 `/v1/embeddings`；Anthropic/Gemini 等非 OpenAI-compatible provider 明確回 501。
+- [x] `internal/proxy/proxy.go` 新增 `ServeCompletions`：OpenAI-compatible provider pass-through 到 legacy `/v1/completions`；`stream:true` 沿用 SSE 原樣透傳。
+- [x] 抽出 `serveOpenAICompatibleEndpoint`：共用 JSON/model/provider resolution、upstream request、Bearer/header、response pass-through 與獨立 5s `LogCall` timeout。
+- [x] `internal/server/server.go` 接上 `/v1/embeddings` 與 `/v1/completions`，沿用 `requireAccessToken`。
+- [x] 新增 e2e 測試：`TestServeEmbeddings_OpenAICompatibleUpstream`、`TestServeCompletions_OpenAICompatibleUpstream`、`TestServeCompletions_StreamPassThrough`、`TestServeEmbeddings_NonOpenAIProviderRejected`。
+- [x] 本機 portable Go 驗證：`gofmt` + `go test -count=1 ./...` + `go vet ./...` 全通過（Windows 無 CGO，`-race` 仍由 CI Linux runner 驗證）。
 
 ## 已完成 (第二輪 bug 排查 · 2026-05-22)
 
@@ -89,7 +98,7 @@
 
 ### P0 · 阻塞性
 
-- [ ] **Stage 4 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
+- [ ] **Stage 5 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
 
 ### P1 · 重要（功能不完整或正確性問題）
 
@@ -106,7 +115,7 @@
 - [ ] **rate limit / per-token quota**：每個 access token 的 RPM/TPM 限制。
 - [ ] **provider 健康檢查**：失敗計數 + 暫時冷卻（circuit breaker），讓 KeyPicker 跳過壞 key。
 - [ ] **dashboard 顯示 token 統計**（依賴上面 token usage 計數）。
-- [ ] **/v1/embeddings、/v1/completions** 等其他 OpenAI 路由的轉發。
+- [ ] **/v1/images、/v1/audio** 等其他 OpenAI 路由的轉發。
 - [ ] **DB schema migration 工具**：現在三套 schema 是 dialect 字串硬編碼，加欄位要三邊改。可導入 `golang-migrate` 或 `pressly/goose` 統一管理版本。
 - [ ] **DB retention job**：背景定時 `DELETE FROM ai_calls WHERE created_at < NOW() - INTERVAL ?`（雲端 DB 必要）。sqlite 時代靠刪檔，現在切雲端後沒清理機制會無限長大。
 - [ ] **DB 連線健康監控**：把 `db.Stats()`（open/idle/wait_count）暴露到 `/api/runtime`，方便診斷雲端連線池異常。

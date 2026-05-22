@@ -841,6 +841,195 @@ func TestServeGeminiGenerateContent_OpenAIStreamingUpstream(t *testing.T) {
 	}
 }
 
+func TestServeEmbeddings_OpenAICompatibleUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var capturedPath, capturedAuth string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"data": []any{map[string]any{
+				"object":    "embedding",
+				"index":     0,
+				"embedding": []float64{0.1, 0.2},
+			}},
+			"model": "text-embedding-3-small",
+			"usage": map[string]any{"prompt_tokens": 2, "total_tokens": 2},
+		})
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	st, err := store.OpenSQLite(filepath.Join(tmp, "embeddings.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk-emb"},
+		Models:     []string{"text-embedding-3-small"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, st)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings",
+		bytes.NewBufferString(`{"model":"text-embedding-3-small","input":"hello"}`))
+	rec := httptest.NewRecorder()
+	p.ServeEmbeddings(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	cPath, cAuth, cBody := capturedPath, capturedAuth, capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/embeddings") {
+		t.Fatalf("expected embeddings path, got %s", cPath)
+	}
+	if cAuth != "Bearer sk-emb" {
+		t.Fatalf("expected bearer auth, got %q", cAuth)
+	}
+	if cBody["model"] != "text-embedding-3-small" || cBody["input"] != "hello" {
+		t.Fatalf("unexpected upstream body: %v", cBody)
+	}
+	if got := rec.Header().Get("X-AI-Hub-Provider"); got != "openai" {
+		t.Fatalf("expected provider header, got %q", got)
+	}
+	if !strings.Contains(rec.Body.String(), "embedding") {
+		t.Fatalf("expected upstream response passthrough, got %s", rec.Body.String())
+	}
+	rows, err := st.RecentCalls(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Status != 200 || rows[0].Provider != "openai" || rows[0].Path != "/v1/embeddings" {
+		t.Fatalf("bad log: %+v", rows)
+	}
+}
+
+func TestServeCompletions_OpenAICompatibleUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var capturedPath, capturedAuth string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      "cmpl-test",
+			"object":  "text_completion",
+			"model":   capturedBody["model"],
+			"choices": []any{map[string]any{"text": "hello completion", "index": 0, "finish_reason": "stop"}},
+		})
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	st, err := store.OpenSQLite(filepath.Join(tmp, "completions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk-cmpl"},
+		Models:     []string{"gpt-3.5-turbo-instruct"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, st)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+		bytes.NewBufferString(`{"model":"gpt-3.5-turbo-instruct","prompt":"hello"}`))
+	rec := httptest.NewRecorder()
+	p.ServeCompletions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	cPath, cAuth, cBody := capturedPath, capturedAuth, capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/completions") {
+		t.Fatalf("expected completions path, got %s", cPath)
+	}
+	if cAuth != "Bearer sk-cmpl" {
+		t.Fatalf("expected bearer auth, got %q", cAuth)
+	}
+	if cBody["model"] != "gpt-3.5-turbo-instruct" || cBody["prompt"] != "hello" {
+		t.Fatalf("unexpected upstream body: %v", cBody)
+	}
+	if !strings.Contains(rec.Body.String(), "hello completion") {
+		t.Fatalf("expected upstream response passthrough, got %s", rec.Body.String())
+	}
+}
+
+func TestServeCompletions_StreamPassThrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: hello completions\\n\\n")
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk"},
+		Models:     []string{"gpt-3.5-turbo-instruct"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+		bytes.NewBufferString(`{"model":"gpt-3.5-turbo-instruct","prompt":"hello","stream":true}`))
+	rec := httptest.NewRecorder()
+	p.ServeCompletions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "data: hello completions") {
+		t.Fatalf("expected SSE passthrough, got %s", rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("expected X-Accel-Buffering=no, got %q", got)
+	}
+}
+
+func TestServeEmbeddings_NonOpenAIProviderRejected(t *testing.T) {
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "anthropic", Enabled: true,
+		BaseURL:    "https://api.anthropic.com",
+		APIKeys:    []string{"ak"},
+		Models:     []string{"claude-3-5-sonnet-20240620"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings",
+		bytes.NewBufferString(`{"model":"claude-3-5-sonnet-20240620","input":"hello"}`))
+	rec := httptest.NewRecorder()
+	p.ServeEmbeddings(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func toStringForTest(v any) string {
 	switch s := v.(type) {
 	case string:

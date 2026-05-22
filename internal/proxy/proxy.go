@@ -193,6 +193,119 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 	p.serveStreamThrough(w, resp, provider.Name, stream, &rec)
 }
 
+// ServeEmbeddings handles OpenAI-compatible `/v1/embeddings` requests.
+func (p *Proxy) ServeEmbeddings(w http.ResponseWriter, r *http.Request) {
+	p.serveOpenAICompatibleEndpoint(w, r, "/v1/embeddings", false)
+}
+
+// ServeCompletions handles OpenAI-compatible legacy `/v1/completions` requests.
+func (p *Proxy) ServeCompletions(w http.ResponseWriter, r *http.Request) {
+	p.serveOpenAICompatibleEndpoint(w, r, "/v1/completions", true)
+}
+
+func (p *Proxy) serveOpenAICompatibleEndpoint(w http.ResponseWriter, r *http.Request, upstreamPath string, allowStream bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	defer r.Body.Close()
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	requestedModel, _ := payload["model"].(string)
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing 'model'")
+		return
+	}
+
+	provider, upstreamModel, err := p.cfg.ProviderForModel(requestedModel)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if kind := providerKindOf(provider); kind != kindOpenAI {
+		writeJSONError(w, http.StatusNotImplemented, fmt.Sprintf("%s is only supported for OpenAI-compatible providers", upstreamPath))
+		return
+	}
+
+	payload["model"] = upstreamModel
+	outBody, err := json.Marshal(payload)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "marshal payload: "+err.Error())
+		return
+	}
+	stream, _ := payload["stream"].(bool)
+	if !allowStream {
+		stream = false
+	}
+
+	rec := store.CallRecord{
+		Timestamp: time.Now(),
+		Provider:  provider.Name,
+		Model:     upstreamModel,
+		Path:      r.URL.Path,
+		BytesIn:   int64(len(body)),
+		ClientIP:  clientIP(r),
+	}
+	start := time.Now()
+	defer func() {
+		rec.LatencyMS = time.Since(start).Milliseconds()
+		if p.store == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), logCallTimeout)
+		defer cancel()
+		_ = p.store.LogCall(ctx, rec)
+	}()
+
+	upstreamURL, headers, err := buildUpstreamRequest(provider, upstreamPath, p.picker.Pick(provider))
+	if err != nil {
+		rec.Status = http.StatusBadGateway
+		rec.ErrMessage = err.Error()
+		writeJSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(provider.TimeoutSec)*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(outBody))
+	if err != nil {
+		rec.Status = http.StatusInternalServerError
+		rec.ErrMessage = err.Error()
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if accept := r.Header.Get("Accept"); accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		rec.Status = http.StatusBadGateway
+		rec.ErrMessage = err.Error()
+		writeJSONError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	p.serveStreamThrough(w, resp, provider.Name, stream, &rec)
+}
+
 // ServeAnthropicMessages handles Anthropic-native `/v1/messages` requests.
 func (p *Proxy) ServeAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

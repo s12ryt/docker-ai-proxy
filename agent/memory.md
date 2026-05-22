@@ -419,3 +419,41 @@
 - `go.exe vet ./...` 全通過。
 
 限制：目前串流轉換覆蓋文字 delta、finish reason、usage 主路徑；tool call streaming 尚未完整抽象，若未來要支援 tool delta 細節需擴充 stream IR。
+
+---
+
+## 2026-05-22 · Stage 5 OpenAI embeddings/completions 端點
+
+### 目標
+
+補上 OpenAI 相容常用非 chat 端點：
+
+- `POST /v1/embeddings`
+- `POST /v1/completions`
+
+本階段採 **OpenAI-compatible pass-through** 策略：只支援 OpenAI / DeepSeek / 任意 OpenAI 相容 provider；Anthropic/Gemini 原生 embedding/completion 沒有統一穩定對應，先明確回 501，避免假翻譯造成錯誤語意。
+
+### 主要變更
+
+1. **`internal/proxy/proxy.go`**
+   - 新增 `ServeEmbeddings`：處理 `/v1/embeddings`，解析 `model`、依 `ProviderForModel` 選 provider，僅允許 `kindOpenAI`，替換成 upstream model 後轉發 `/v1/embeddings`。
+   - 新增 `ServeCompletions`：處理 legacy `/v1/completions`，同樣僅支援 OpenAI-compatible provider；若 request `stream:true`，沿用 `serveStreamThrough` 做 SSE 原樣透傳。
+   - 抽出 `serveOpenAICompatibleEndpoint` 共用 method/body/json/model/provider resolution、request 建立、header/auth、獨立 5s `LogCall` timeout、response pass-through。
+   - 非 OpenAI-compatible provider（Anthropic/Gemini）對 embeddings/completions 回 `501 Not Implemented`。
+
+2. **`internal/server/server.go`**
+   - 新增 `/v1/embeddings` 與 `/v1/completions`，都沿用 `requireAccessToken`。
+
+3. **測試**
+   - `TestServeEmbeddings_OpenAICompatibleUpstream`：fake OpenAI upstream 驗證 `/v1/embeddings` path、Bearer auth、body model/input、response pass-through、provider header、store log。
+   - `TestServeCompletions_OpenAICompatibleUpstream`：驗證 `/v1/completions` path、Bearer auth、prompt/model pass-through 與 response pass-through。
+   - `TestServeCompletions_StreamPassThrough`：legacy completion streaming 使用 SSE 原樣透傳並補 `X-Accel-Buffering: no`。
+   - `TestServeEmbeddings_NonOpenAIProviderRejected`：Anthropic provider 對 embeddings 明確回 501。
+
+### 驗證
+
+- `gofmt.exe -w internal/proxy/proxy.go internal/proxy/proxy_test.go internal/server/server.go`
+- `go.exe test -count=1 ./...` 全通過。
+- `go.exe vet ./...` 全通過。
+
+限制：Stage 5 不做 Anthropic/Gemini 原生 embeddings/completions 翻譯；若未來供應商 API 有明確對應，可新增 IR 或 provider-specific 分支。
