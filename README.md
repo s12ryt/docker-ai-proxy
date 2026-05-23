@@ -6,6 +6,8 @@
 ![Go](https://img.shields.io/badge/Go-1.22-7c3aed)
 ![Docker](https://img.shields.io/badge/docker-multi--arch-06b6d4)
 
+[English README](./README.en.md) · [OpenAPI spec](./openapi.yaml)
+
 ---
 
 ## ✨ 特性

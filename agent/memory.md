@@ -630,6 +630,28 @@ Responses API 採 **OpenAI-compatible raw pass-through**：
 
 ### 驗證
 
-- 本機已跑 `gofmt`、`go test -count=1 ./...`、`go vet ./...`。
+- 本機已跑 `gofmt`、`go test -count=1 ./...`、`go vet ./...`、`git diff --check`（僅 autocrlf warning）。
 - `scripts/dev.ps1 -Task vet` 已可執行。
-- 後續 commit 前仍需 `git diff --check`，push 後以 GitHub Actions 驗證 Linux race / Docker build。
+- commit `e17f3c2` push 後 GitHub Actions `ci.yml` 與 `docker-publish.yml` 全綠。
+
+---
+
+## 2026-05-23 · P3 README.en / OpenAPI 文件切片
+
+### 目標
+
+延續使用者「繼續」要求，完成剩餘 P3 中的國際文件與 API 規格輸出：英文 README 與 OpenAPI/Swagger 描述。
+
+### 主要變更
+
+1. **英文 README**
+   - 新增 `README.en.md`，以英文整理多協定 gateway 特性、快速開始、環境變數、API 範例、OpenAI-compatible endpoints、admin API、開發腳本與安全注意事項。
+   - 主 README 新增英文版與 OpenAPI spec 連結，方便國際使用者入口。
+
+2. **OpenAPI 規格**
+   - 新增 `openapi.yaml`（OpenAPI 3.0.3），描述 `/healthz`、`/v1/models`、OpenAI/Anthropic/Gemini chat ingress、OpenAI Responses/embeddings/completions/images/audio pass-through，以及 `/api/*` 管理端點。
+   - 規格標出 Bearer access token 與 admin token 兩種安全模型，並覆蓋 JSON / SSE response 形態。
+
+### 驗證
+
+- 目前為 docs/spec-only 變更；後續 commit 前仍需 `git diff --check`、`go test -count=1 ./...`、`go vet ./...`，push 後以 GitHub Actions 驗證。

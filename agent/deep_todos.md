@@ -117,6 +117,12 @@
 - [x] **P2 Bug 16**：`rebindPostgres` 現在會略過 `-- line comment` 與 `/* block comment */` 內的 `?`，保留既有字串 literal / `''` escape 處理；測試補註釋案例。
 - [x] **P3 本機開發**：新增 `scripts/dev.ps1`，支援 `fmt` / `test` / `vet` / `check` / `all`，會優先使用 PATH 上的 Go，否則回退到 `%TEMP%\\opencode\\go\\bin\\go.exe`。
 - [x] README / config.example.json / agent 文件補 `DB_RETENTION_DAYS`、retention 行為與 dev script 說明。
+- [x] CI 驗證：`e17f3c2` 後 `ci.yml` 與 `docker-publish.yml` 全綠；P2/P3 retention/rebind/dev script 切片完成。
+
+### P3 文件規格切片 · 2026-05-23
+- [x] **README 補英文版**：新增 `README.en.md`，涵蓋多協定 gateway 特性、快速開始、環境變數、API 範例、admin API、本機開發腳本與安全注意事項。
+- [x] **OpenAPI / Swagger**：新增 `openapi.yaml`，描述 `/healthz`、`/v1/*` 多協定與 OpenAI-compatible 端點、`/api/*` 管理端點、Bearer/admin 認證、JSON/SSE response 形態。
+- [x] `README.md` 加上英文 README 與 OpenAPI spec 連結，方便國際使用者與工具導入。
 
 ## 已完成 (第二輪 bug 排查 · 2026-05-22)
 
@@ -140,7 +146,7 @@
 
 ### P0 · 阻塞性
 
-- [ ] **DB retention / rebind / dev script 實作切片 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
+- [ ] **README.en / OpenAPI 文件切片 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
 
 ### P1 · 重要（功能不完整或正確性問題）
 
@@ -167,7 +173,7 @@
 - [x] **本機開發**：新增 `scripts/dev.ps1`，支援 `fmt` / `test` / `vet` / `check` / `all`，會優先使用 PATH 上的 Go，否則回退到 `%TEMP%\\opencode\\go\\bin\\go.exe`。
 - [x] **更多 e2e 測試**：補強 token usage、SSE stream usage、runtime db_stats、reload method/status 測試；先前多協定階段已覆蓋 SSE 流式與 Anthropic/Gemini 路徑。
 - [ ] **dashboard.js 切換 provider enable/disable** 的 UI（目前只能改 config.json + 重啟）。
-- [ ] **README 補英文版**（README.en.md）給國際用戶。
-- [ ] **OpenAPI / Swagger** 描述 `/v1/*` 與 `/api/*`。
+- [x] **README 補英文版**：新增 `README.en.md` 給國際用戶。
+- [x] **OpenAPI / Swagger**：新增 `openapi.yaml` 描述 `/v1/*` 與 `/api/*`。
 - [ ] **read replica / read-write 分流**：高流量場景需 `DB_READ_DSN` 之類設計（讀走 replica）。雲端 DB 才有意義，sqlite 用不到。
 - [x] **Bug 18 · `main.go -version` flag 大小寫不敏感**：已補 `strings.ToLower`。

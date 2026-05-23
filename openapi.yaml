@@ -1,0 +1,433 @@
+openapi: 3.0.3
+info:
+  title: AI Hub API
+  version: 1.0.0
+  description: >-
+    Multi-protocol AI gateway for OpenAI-compatible, Anthropic, and Gemini
+    chat APIs, plus OpenAI-compatible Responses, embeddings, completions,
+    images, and audio pass-through endpoints.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      summary: Public health check
+      security: []
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  version:
+                    type: string
+                  uptime:
+                    type: string
+  /v1/models:
+    get:
+      summary: List enabled models
+      responses:
+        '200':
+          description: OpenAI-compatible model list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    example: list
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Model'
+  /v1/chat/completions:
+    post:
+      summary: OpenAI-compatible chat completions ingress
+      description: Routes to OpenAI-compatible providers directly or translates to Anthropic/Gemini upstream protocols.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, messages]
+              additionalProperties: true
+              properties:
+                model:
+                  type: string
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+                stream:
+                  type: boolean
+      responses:
+        '200':
+          description: OpenAI chat completion or SSE stream
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/messages:
+    post:
+      summary: Anthropic Messages ingress
+      description: Accepts Anthropic-native requests and translates to the selected upstream provider when necessary.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, messages]
+              additionalProperties: true
+              properties:
+                model:
+                  type: string
+                max_tokens:
+                  type: integer
+                stream:
+                  type: boolean
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+      responses:
+        '200':
+          description: Anthropic message or event stream
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1beta/models/{model}:generateContent:
+    post:
+      summary: Gemini generateContent ingress
+      parameters:
+        - name: model
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Gemini response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1beta/models/{model}:streamGenerateContent:
+    post:
+      summary: Gemini streamGenerateContent ingress
+      parameters:
+        - name: model
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Gemini SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /v1/responses:
+    post:
+      summary: OpenAI Responses API pass-through
+      description: OpenAI-compatible providers only; supports raw SSE pass-through.
+      requestBody:
+        $ref: '#/components/requestBodies/GenericJSON'
+      responses:
+        '200':
+          $ref: '#/components/responses/GenericJSONOrSSE'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /v1/embeddings:
+    post:
+      summary: OpenAI embeddings pass-through
+      description: OpenAI-compatible providers only.
+      requestBody:
+        $ref: '#/components/requestBodies/GenericJSON'
+      responses:
+        '200':
+          $ref: '#/components/responses/GenericJSON'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /v1/completions:
+    post:
+      summary: OpenAI legacy completions pass-through
+      description: OpenAI-compatible providers only; supports raw SSE pass-through.
+      requestBody:
+        $ref: '#/components/requestBodies/GenericJSON'
+      responses:
+        '200':
+          $ref: '#/components/responses/GenericJSONOrSSE'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /v1/images/{operation}:
+    post:
+      summary: OpenAI images pass-through
+      description: OpenAI-compatible providers only. The operation path segment is forwarded to the upstream provider.
+      parameters:
+        - name: operation
+          in: path
+          required: true
+          schema:
+            type: string
+            example: generations
+      requestBody:
+        $ref: '#/components/requestBodies/GenericJSON'
+      responses:
+        '200':
+          $ref: '#/components/responses/GenericJSON'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /v1/audio/{operation}:
+    post:
+      summary: OpenAI audio pass-through
+      description: OpenAI-compatible providers only. Supports JSON and multipart/form-data request bodies.
+      parameters:
+        - name: operation
+          in: path
+          required: true
+          schema:
+            type: string
+            example: transcriptions
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+          multipart/form-data:
+            schema:
+              type: object
+              required: [model]
+              additionalProperties: true
+              properties:
+                model:
+                  type: string
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          $ref: '#/components/responses/GenericJSON'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/summary:
+    get:
+      summary: Aggregate call summary
+      security:
+        - adminBearerAuth: []
+      parameters:
+        - name: hours
+          in: query
+          schema:
+            type: integer
+            default: 24
+            minimum: 1
+            maximum: 720
+      responses:
+        '200':
+          description: Summary
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/providers:
+    get:
+      summary: Provider configuration without API keys
+      security:
+        - adminBearerAuth: []
+      responses:
+        '200':
+          description: Providers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+  /api/recent:
+    get:
+      summary: Recent calls
+      security:
+        - adminBearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 500
+      responses:
+        '200':
+          description: Recent call records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+  /api/runtime:
+    get:
+      summary: Runtime and DB pool stats
+      security:
+        - adminBearerAuth: []
+      responses:
+        '200':
+          description: Runtime stats
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/reload:
+    post:
+      summary: Reload config.json
+      security:
+        - adminBearerAuth: []
+      responses:
+        '200':
+          description: Reload status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '405':
+          description: Method not allowed
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Client access token from ACCESS_TOKENS.
+    adminBearerAuth:
+      type: http
+      scheme: bearer
+      description: Admin token from ADMIN_TOKEN. The server also accepts admin_token query parameter for dashboard compatibility.
+  requestBodies:
+    GenericJSON:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [model]
+            additionalProperties: true
+            properties:
+              model:
+                type: string
+              stream:
+                type: boolean
+  responses:
+    GenericJSON:
+      description: JSON response
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+    GenericJSONOrSSE:
+      description: JSON response or SSE stream
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+        text/event-stream:
+          schema:
+            type: string
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthorized:
+      description: Unauthorized
+      content:
+        text/plain:
+          schema:
+            type: string
+    NotImplemented:
+      description: Provider/protocol combination is not implemented
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    Model:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          example: model
+        owned_by:
+          type: string
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+            code:
+              oneOf:
+                - type: string
+                - type: integer
