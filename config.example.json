@@ -2,6 +2,9 @@
   "listen": ":8080",
   "admin_token": "change-me-please",
   "access_tokens": ["client-token-1"],
+  "auth_jwt_secret": "change-me-long-random-session-secret",
+  "auth_cookie_secure": false,
+  "auth_session_ttl": "24h",
 
   "telegram_user_id": "123456789",
   "telegram_bot_id": "987654321",

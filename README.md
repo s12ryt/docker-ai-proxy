@@ -17,7 +17,7 @@
 - **多供應商**：OpenAI / Anthropic / Gemini / DeepSeek，以及任何 OpenAI 相容端點
 - **流式 SSE 翻譯**：OpenAI chunk、Anthropic event stream、Gemini streamGenerateContent 文字 delta 雙向轉譯
 - **密鑰池**：每個供應商可配置多把 Key，自動輪轉
-- **訪問控制**：管理員 Token + 客戶端訪問 Token 白名單
+- **訪問控制**：帳密登入 + HttpOnly 管理 Cookie，並保留客戶端訪問 Token 白名單
 - **實時觀測**：SQLite / MySQL / PostgreSQL 三選一（純 Go 驅動，無 CGO）記錄每次呼叫，內建儀表板
 - **單檔部署**：Go 靜態二進制，Docker 鏡像基於 `distroless/static` 約 20-25 MB
 - **多架構鏡像**：`linux/amd64` + `linux/arm64`，自動發佈到 `ghcr.io`
@@ -30,6 +30,7 @@
 docker run -d --name ai-hub \
   -p 8080:8080 \
   -e ADMIN_TOKEN=please-change-me \
+  -e AUTH_JWT_SECRET=please-change-long-random-session-secret \
   -e ACCESS_TOKENS=client-token-1 \
   -v $(pwd)/data:/data \
   -v $(pwd)/config.json:/app/config.json:ro \
@@ -52,7 +53,7 @@ go build -o ai-hub ./cmd/ai-hub
 ./ai-hub
 ```
 
-打開瀏覽器訪問 `http://localhost:8080`,儀表板在 `/dashboard.html`。
+打開瀏覽器訪問 `http://localhost:8080`,儀表板在 `/dashboard.html`。首次進入儀表板時可建立第一位管理員；之後以帳密登入，管理 session 會存放在 HttpOnly `ai_hub_session` Cookie。
 
 ## 🔧 配置
 
@@ -61,8 +62,11 @@ go build -o ai-hub ./cmd/ai-hub
 | 環境變數 | 預設 | 說明 |
 | --- | --- | --- |
 | `LISTEN` | `:8080` | 監聽地址 |
-| `ADMIN_TOKEN` | `change-me-admin` | 控制台與 `/api/*` 認證 Token |
+| `ADMIN_TOKEN` | `change-me-admin` | Legacy 管理 Token；仍可用於腳本存取 `/api/*` |
 | `ACCESS_TOKENS` | (空) | 逗號分隔的客戶端訪問 Token;空表示開放呼叫 |
+| `AUTH_JWT_SECRET` | (空) | 管理登入 Cookie 簽章密鑰；生產環境務必設定長隨機字串 |
+| `AUTH_COOKIE_SECURE` | `0` | 是否為登入 Cookie 加上 `Secure`；HTTPS 生產環境建議設 `1` |
+| `AUTH_SESSION_TTL` | `24h` | 管理登入 session 有效期，Go duration 格式，例如 `8h`、`168h` |
 | `TELEGRAM_USER_ID` | (空) | Telegram 使用者 ID（預留給通知/審計整合） |
 | `TELEGRAM_BOT_ID` | (空) | Telegram Bot ID（預留給通知/審計整合） |
 | `DB_DRIVER` | `sqlite` | 資料庫驅動,可選 `sqlite` / `mysql` / `postgres` |
@@ -116,6 +120,9 @@ DSN 格式:
 {
   "admin_token": "please-change",
   "access_tokens": ["client-token-1"],
+  "auth_jwt_secret": "change-me-long-random-session-secret",
+  "auth_cookie_secure": false,
+  "auth_session_ttl": "24h",
   "telegram_user_id": "123456789",
   "telegram_bot_id": "987654321",
   "providers": [
@@ -242,15 +249,23 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-### 管理端點(需要 `ADMIN_TOKEN`)
+### 管理登入與端點
+
+Dashboard 使用帳密登入與 HttpOnly `ai_hub_session` Cookie。第一次部署時可透過 `/dashboard.html` 建立第一位管理員；後續管理端點接受管理員 Cookie，並保留 legacy `ADMIN_TOKEN` Bearer / `?admin_token=` 給既有腳本使用。
 
 | 端點 | 用途 |
 | --- | --- |
+| `GET /api/auth/bootstrap` | 檢查是否尚未建立第一位管理員 |
+| `POST /api/auth/register` | 建立第一位管理員；已登入 admin 時可新增使用者 |
+| `POST /api/auth/login` | 使用帳密登入並設定 `ai_hub_session` Cookie |
+| `POST /api/auth/logout` | 清除登入 Cookie |
+| `GET /api/auth/profile` | 取得目前登入使用者資訊（不含密碼雜湊） |
 | `GET /api/summary?hours=24` | 總請求/錯誤/延遲/Token 聚合 |
 | `GET /api/providers` | 供應商配置(不含 Keys) |
+| `PUT /api/providers` | 更新供應商配置（需 JSON Content-Type；Cookie 登入需同源 Origin/Referer） |
 | `GET /api/recent?limit=100` | 最近呼叫列表 |
 | `GET /api/runtime` | Go 運行時資訊與 DB 連線池統計 |
-| `POST /api/reload` | 熱重載 `config.json`（需管理員權限） |
+| `POST /api/reload` | 熱重載 `config.json`（需 JSON Content-Type；Cookie 登入需同源 Origin/Referer） |
 | `GET /healthz` | 公開健康檢查 |
 
 ## 🏗️ 專案結構
@@ -300,9 +315,11 @@ ghcr.io/s12ryt/docker-ai-proxy:sha-abc1234
 
 ## 🔒 安全注意事項
 
-- **務必修改** `ADMIN_TOKEN`,它能讀取所有調用日誌
-- 生產環境建議在前面套一層 TLS(Caddy / Nginx / Cloudflare)
-- `data/ai-hub.db` 內含調用元數據(無 prompt 內容)，可用 `DB_RETENTION_DAYS` 自動清理舊紀錄；設為 `0` 時請自行管理保留週期
+- **務必設定** `AUTH_JWT_SECRET` 為長隨機字串；未設定時只會使用程序內暫時密鑰，重啟後既有登入 Cookie 會失效
+- `ADMIN_TOKEN` 僅作為 legacy 腳本相容用途，仍應修改為強隨機值並避免外洩
+- 生產環境建議在前面套一層 TLS(Caddy / Nginx / Cloudflare)，並設定 `AUTH_COOKIE_SECURE=1`
+- Cookie 登入的 mutating `/api/*` 請求需 `Content-Type: application/json` 且具備同源 `Origin` 或 `Referer`，用來降低 CSRF 風險
+- `data/ai-hub.db` 內含調用元數據(無 prompt 內容)與使用者帳號雜湊，可用 `DB_RETENTION_DAYS` 自動清理舊呼叫紀錄；設為 `0` 時請自行管理保留週期
 
 ## 📜 License
 

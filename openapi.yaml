@@ -256,11 +256,151 @@ paths:
           $ref: '#/components/responses/GenericJSON'
         '501':
           $ref: '#/components/responses/NotImplemented'
+  /api/auth/bootstrap:
+    get:
+      summary: Check first-admin bootstrap status
+      security: []
+      responses:
+        '200':
+          description: Bootstrap status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bootstrap_required:
+                    type: boolean
+  /api/auth/register:
+    post:
+      summary: Create the initial admin or register a user as admin
+      security:
+        - adminSessionCookie: []
+        - adminBearerAuth: []
+        - adminQueryToken: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                  format: password
+                  minLength: 8
+                role:
+                  type: string
+                  enum: [admin, user]
+      responses:
+        '200':
+          description: Registered user; first admin also receives session cookie
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Initial admin already exists
+        '415':
+          description: JSON content type required
+  /api/auth/login:
+    post:
+      summary: Login with username and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: Login status and user profile
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '415':
+          description: JSON content type required
+  /api/auth/logout:
+    post:
+      summary: Logout and clear the session cookie
+      security:
+        - adminSessionCookie: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Logout status
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Origin or Referer rejected
+        '415':
+          description: JSON content type required
+  /api/auth/profile:
+    get:
+      summary: Get current logged-in user profile
+      security:
+        - adminSessionCookie: []
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/PublicUser'
+                  bootstrap_required:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /api/summary:
     get:
       summary: Aggregate call summary
       security:
+        - adminSessionCookie: []
         - adminBearerAuth: []
+        - adminQueryToken: []
       parameters:
         - name: hours
           in: query
@@ -283,7 +423,9 @@ paths:
     get:
       summary: Provider configuration without API keys
       security:
+        - adminSessionCookie: []
         - adminBearerAuth: []
+        - adminQueryToken: []
       responses:
         '200':
           description: Providers
@@ -294,11 +436,50 @@ paths:
                 items:
                   type: object
                   additionalProperties: true
+    put:
+      summary: Replace provider configuration
+      description: Requires application/json. Cookie-authenticated browser requests must include same-origin Origin or Referer.
+      security:
+        - adminSessionCookie: []
+        - adminBearerAuth: []
+        - adminQueryToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+      responses:
+        '200':
+          description: Updated providers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Origin or Referer rejected
+        '415':
+          description: JSON content type required
   /api/recent:
     get:
       summary: Recent calls
       security:
+        - adminSessionCookie: []
         - adminBearerAuth: []
+        - adminQueryToken: []
       parameters:
         - name: limit
           in: query
@@ -320,7 +501,9 @@ paths:
     get:
       summary: Runtime and DB pool stats
       security:
+        - adminSessionCookie: []
         - adminBearerAuth: []
+        - adminQueryToken: []
       responses:
         '200':
           description: Runtime stats
@@ -333,7 +516,15 @@ paths:
     post:
       summary: Reload config.json
       security:
+        - adminSessionCookie: []
         - adminBearerAuth: []
+        - adminQueryToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
       responses:
         '200':
           description: Reload status
@@ -344,8 +535,12 @@ paths:
                 properties:
                   ok:
                     type: boolean
+        '403':
+          description: Origin or Referer rejected
         '405':
           description: Method not allowed
+        '415':
+          description: JSON content type required
 components:
   securitySchemes:
     bearerAuth:
@@ -355,7 +550,17 @@ components:
     adminBearerAuth:
       type: http
       scheme: bearer
-      description: Admin token from ADMIN_TOKEN. The server also accepts admin_token query parameter for dashboard compatibility.
+      description: Legacy admin token from ADMIN_TOKEN.
+    adminQueryToken:
+      type: apiKey
+      in: query
+      name: admin_token
+      description: Legacy admin token query parameter for scripts and compatibility.
+    adminSessionCookie:
+      type: apiKey
+      in: cookie
+      name: ai_hub_session
+      description: HttpOnly management session cookie issued by /api/auth/login or first-admin registration.
   requestBodies:
     GenericJSON:
       required: true
@@ -407,6 +612,36 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
   schemas:
+    AuthResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        user:
+          $ref: '#/components/schemas/PublicUser'
+    PublicUser:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        username:
+          type: string
+        role:
+          type: string
+          enum: [admin, user]
+        disabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_login_at:
+          type: string
+          format: date-time
+          nullable: true
     Model:
       type: object
       properties:
