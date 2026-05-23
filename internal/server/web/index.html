@@ -39,10 +39,10 @@
       </h1>
       <p class="lede">
         以單一 OpenAI 相容 API 接入 <b>OpenAI</b>、<b>Anthropic</b>、<b>Gemini</b>、<b>DeepSeek</b> 等主流大模型。
-        內建密鑰池輪轉、流式轉發、實時監控與審計日誌 — 用 Go 撰寫,單檔部署,啟動 &lt; 100ms。
+        內建密鑰池輪轉、帳密控制台、HttpOnly Session、流式轉發、實時監控與審計日誌 — 用 Go 撰寫,單檔部署,啟動 &lt; 100ms。
       </p>
       <div class="hero-cta">
-        <a class="btn primary" href="/dashboard.html">進入控制台 →</a>
+        <a class="btn primary" href="/dashboard.html">登入 / 建立管理員 →</a>
         <a class="btn ghost" href="#api">查看 API</a>
       </div>
       <div class="hero-stats">
@@ -82,7 +82,7 @@
     <article class="card glass">
       <div class="ic ic-shield"></div>
       <h3>密鑰池 · 訪問控制</h3>
-      <p>支援多 API Key 輪轉、訪問令牌白名單、管理員 Token、IP 記錄與審計追蹤。</p>
+      <p>支援多 API Key 輪轉、客戶端 ACCESS_TOKENS 白名單、Dashboard 帳密登入、HttpOnly Cookie 與審計追蹤。</p>
     </article>
     <article class="card glass">
       <div class="ic ic-chart"></div>
@@ -115,20 +115,28 @@
 
   <section id="api" class="api">
     <h2>三步上手</h2>
+    <p class="sub">啟動後先到 <code>/dashboard.html</code> 建立第一位管理員；管理端使用 HttpOnly Cookie 登入，客戶端仍透過 <code>ACCESS_TOKENS</code> 呼叫 <code>/v1/*</code>。</p>
     <div class="steps">
       <div class="step glass">
         <span class="num">1</span>
         <h4>使用 Docker 啟動</h4>
 <pre><code>docker run -d --name ai-hub \
   -p 8080:8080 \
+  -e AUTH_JWT_SECRET=please-change-long-random-secret \
+  -e ACCESS_TOKENS=client-token-1 \
   -v $(pwd)/data:/data \
-  -v $(pwd)/config.json:/app/config.json \
-  ghcr.io/yourname/ai-hub:latest</code></pre>
+  -v $(pwd)/config.json:/app/config.json:ro \
+  ghcr.io/s12ryt/docker-ai-proxy:latest</code></pre>
       </div>
       <div class="step glass">
         <span class="num">2</span>
         <h4>編輯 config.json</h4>
 <pre><code>{
+  "admin_token": "legacy-script-token",
+  "access_tokens": ["client-token-1"],
+  "auth_jwt_secret": "please-change-long-random-secret",
+  "auth_cookie_secure": false,
+  "auth_session_ttl": "24h",
   "providers": [{
     "name": "openai",
     "enabled": true,
@@ -140,7 +148,8 @@
       </div>
       <div class="step glass">
         <span class="num">3</span>
-        <h4>用任何 OpenAI SDK 呼叫</h4>
+        <h4>建立管理員並呼叫 API</h4>
+        <p class="sub">先開啟 <code>http://localhost:8080/dashboard.html</code> 建立第一位管理員，再用客戶端 Token 呼叫模型。</p>
 <pre><code>from openai import OpenAI
 client = OpenAI(
   base_url="http://localhost:8080/v1",
