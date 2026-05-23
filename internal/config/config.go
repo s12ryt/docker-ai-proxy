@@ -3,8 +3,10 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +39,9 @@ type Config struct {
 	DBMaxIdle       int        `json:"db_max_idle_conns"`
 	DBConnMaxLife   string     `json:"db_conn_max_lifetime"`
 	DBRetentionDays int        `json:"db_retention_days"`
+	AuthJWTSecret    string     `json:"auth_jwt_secret"`
+	AuthCookieSecure bool      `json:"auth_cookie_secure"`
+	AuthSessionTTL   string     `json:"auth_session_ttl"`
 	Providers       []Provider `json:"providers"`
 	EnableMetrics   bool       `json:"enable_metrics"`
 	StartedAt       time.Time  `json:"-"`
@@ -81,6 +86,9 @@ func Reload() {
 	current.DBMaxIdle = c.DBMaxIdle
 	current.DBConnMaxLife = c.DBConnMaxLife
 	current.DBRetentionDays = c.DBRetentionDays
+	current.AuthJWTSecret = c.AuthJWTSecret
+	current.AuthCookieSecure = c.AuthCookieSecure
+	current.AuthSessionTTL = c.AuthSessionTTL
 	current.Providers = c.Providers
 	current.EnableMetrics = c.EnableMetrics
 }
@@ -109,6 +117,20 @@ func (c *Config) Snapshot() Config {
 		out.Providers = nil
 	}
 	return out
+}
+
+// ReplaceProviders swaps the provider list in memory after validation and normalization.
+func (c *Config) ReplaceProviders(providers []Provider) error {
+	if err := ValidateProviders(providers); err != nil {
+		return err
+	}
+	NormalizeProviders(providers)
+	if c.mu != nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+	}
+	c.Providers = cloneProviders(providers)
+	return nil
 }
 
 // FindProvider locates a provider by name (case-insensitive).
@@ -161,13 +183,14 @@ func (c *Config) ProviderForModel(model string) (Provider, string, error) {
 
 func load() *Config {
 	c := &Config{
-		mu:            new(sync.RWMutex),
-		Listen:        ":8080",
-		AdminToken:    "change-me-admin",
-		DBPath:        "data/ai-hub.db",
-		DBDriver:      "sqlite",
-		EnableMetrics: true,
-		StartedAt:     time.Now(),
+		mu:             new(sync.RWMutex),
+		Listen:         ":8080",
+		AdminToken:     "change-me-admin",
+		DBPath:         "data/ai-hub.db",
+		DBDriver:       "sqlite",
+		AuthSessionTTL: "24h",
+		EnableMetrics:  true,
+		StartedAt:      time.Now(),
 	}
 
 	path := envOr("CONFIG_PATH", "config.json")
@@ -212,6 +235,13 @@ func load() *Config {
 			if fileCfg.DBRetentionDays > 0 {
 				c.DBRetentionDays = fileCfg.DBRetentionDays
 			}
+			if fileCfg.AuthJWTSecret != "" {
+				c.AuthJWTSecret = fileCfg.AuthJWTSecret
+			}
+			c.AuthCookieSecure = fileCfg.AuthCookieSecure
+			if fileCfg.AuthSessionTTL != "" {
+				c.AuthSessionTTL = fileCfg.AuthSessionTTL
+			}
 			if len(fileCfg.Providers) > 0 {
 				c.Providers = fileCfg.Providers
 			}
@@ -224,6 +254,7 @@ func load() *Config {
 		c.Providers = defaultProviders()
 	}
 
+	NormalizeProviders(c.Providers)
 	for i := range c.Providers {
 		if c.Providers[i].TimeoutSec == 0 {
 			c.Providers[i].TimeoutSec = 120
@@ -233,6 +264,120 @@ func load() *Config {
 		}
 	}
 	return c
+}
+
+// ConfigPath returns the active configuration file path.
+func ConfigPath() string {
+	return envOr("CONFIG_PATH", "config.json")
+}
+
+// SaveProviders replaces the providers array in the active configuration file
+// and updates the in-memory config. Environment variable overrides still take
+// priority for other top-level settings when the process reloads.
+func SaveProviders(providers []Provider) error {
+	if err := ValidateProviders(providers); err != nil {
+		return err
+	}
+	NormalizeProviders(providers)
+
+	path := ConfigPath()
+	fileCfg := Config{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &fileCfg); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	fileCfg.Providers = providers
+
+	data, err := json.MarshalIndent(fileCfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	data = append(data, '\n')
+
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create config dir: %w", err)
+		}
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+
+	if current == nil {
+		current = load()
+		return nil
+	}
+	if current.mu == nil {
+		current.mu = new(sync.RWMutex)
+	}
+	current.mu.Lock()
+	current.Providers = cloneProviders(providers)
+	current.mu.Unlock()
+	return nil
+}
+
+// ValidateProviders checks the user-editable provider list before persisting it.
+func ValidateProviders(providers []Provider) error {
+	seen := map[string]struct{}{}
+	for i, p := range providers {
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			return fmt.Errorf("provider #%d name is required", i+1)
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			return fmt.Errorf("provider %q is duplicated", name)
+		}
+		seen[key] = struct{}{}
+		if strings.ContainsAny(name, "/ \\\t\r\n") {
+			return fmt.Errorf("provider %q name cannot contain spaces or slashes", name)
+		}
+		if strings.TrimSpace(p.BaseURL) == "" {
+			return fmt.Errorf("provider %q base_url is required", name)
+		}
+	}
+	return nil
+}
+
+// NormalizeProviders trims whitespace and applies runtime defaults to providers.
+func NormalizeProviders(providers []Provider) {
+	for i := range providers {
+		providers[i].Name = strings.TrimSpace(providers[i].Name)
+		providers[i].DisplayName = strings.TrimSpace(providers[i].DisplayName)
+		providers[i].BaseURL = strings.TrimRight(strings.TrimSpace(providers[i].BaseURL), "/")
+		providers[i].APIKeys = cleanStrings(providers[i].APIKeys)
+		providers[i].Models = cleanStrings(providers[i].Models)
+		if providers[i].Weight == 0 {
+			providers[i].Weight = 1
+		}
+		if providers[i].TimeoutSec == 0 {
+			providers[i].TimeoutSec = 120
+		}
+	}
+}
+
+func cloneProviders(providers []Provider) []Provider {
+	out := make([]Provider, len(providers))
+	for i, p := range providers {
+		out[i] = p
+		out[i].APIKeys = append([]string(nil), p.APIKeys...)
+		out[i].Models = append([]string(nil), p.Models...)
+	}
+	return out
+}
+
+func cleanStrings(items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func envOr(key, fallback string) string {
@@ -279,9 +424,31 @@ func applyEnvOverrides(c *Config) {
 	if v := envInt("DB_RETENTION_DAYS", c.DBRetentionDays); v != c.DBRetentionDays {
 		c.DBRetentionDays = v
 	}
+	if v := os.Getenv("AUTH_JWT_SECRET"); v != "" {
+		c.AuthJWTSecret = v
+	}
+	if v := os.Getenv("AUTH_COOKIE_SECURE"); v != "" {
+		c.AuthCookieSecure = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+	}
+	if v := os.Getenv("AUTH_SESSION_TTL"); v != "" {
+		c.AuthSessionTTL = v
+	}
 	if v := os.Getenv("ENABLE_METRICS"); v != "" {
 		c.EnableMetrics = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 	}
+}
+
+// AuthSessionDuration returns the configured login session lifetime.
+func (c *Config) AuthSessionDuration() time.Duration {
+	if c == nil || strings.TrimSpace(c.AuthSessionTTL) == "" {
+		return 24 * time.Hour
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(c.AuthSessionTTL))
+	if err != nil || d <= 0 {
+		log.Printf("[config] auth_session_ttl=%q invalid, using 24h", c.AuthSessionTTL)
+		return 24 * time.Hour
+	}
+	return d
 }
 
 func splitCSV(s string) []string {
