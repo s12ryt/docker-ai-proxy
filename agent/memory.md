@@ -600,5 +600,36 @@ Responses API 採 **OpenAI-compatible raw pass-through**：
 
 ### 驗證
 
-- 本機 portable Go 已跑 `gofmt` 與 `go test -count=1 ./...` 全通過。
-- 後續 commit 前仍需跑 `go vet ./...`、`git diff --check`，並以 GitHub Actions Linux runner 驗證 race test。
+- 本機 portable Go 已跑 `gofmt`、`go test -count=1 ./...`、`go vet ./...`、`git diff --check` 全通過（`diff --check` 僅 Windows autocrlf warning）。
+- commit `c78bf7f` push 後 GitHub Actions `ci.yml` 與 `docker-publish.yml` 全綠。
+
+---
+
+## 2026-05-23 · P2/P3 retention / rebind / dev script 實作切片
+
+### 目標
+
+延續使用者「繼續實作」要求，處理剩餘 backlog 中相對安全且能獨立落地的項目：DB retention job、PostgreSQL placeholder rebind 註釋處理，以及本機開發腳本。
+
+### 主要變更
+
+1. **DB retention**
+   - `config.Config` 新增 `DBRetentionDays`，支援 JSON `db_retention_days` 與 env `DB_RETENTION_DAYS`。
+   - `config.example.json` 與 README 補 `db_retention_days` / `DB_RETENTION_DAYS` 說明；`0` 表示停用自動清理。
+   - `store.Store` 新增 `DeleteCallsBefore(ctx, before)` 與 `ApplyRetention(ctx, days)`，透過 dialect rebind 兼容 SQLite / MySQL / PostgreSQL。
+   - `cmd/ai-hub/main.go` 啟動時若 retention days > 0，會先清理一次，之後每 24 小時背景清理；shutdown 前會停止 retention goroutine，避免與 store close 競態。
+   - `store_test.go` 新增 retention 啟用/停用測試。
+
+2. **PostgreSQL rebind 註釋處理**
+   - `rebindPostgres` 現在除了略過 single-quoted strings 與 `''` escape，也會略過 `-- line comment` 和 `/* block comment */` 內的 `?`。
+   - `dialect_test.go` 補 line comment / block comment case，避免未來 query builder 或手寫註釋 SQL 出現 placeholder 誤編號。
+
+3. **本機開發腳本**
+   - 新增 `scripts/dev.ps1`，支援 `fmt` / `test` / `vet` / `check` / `all`。
+   - 腳本優先使用 PATH 上的 Go；若找不到，會回退到 `%TEMP%\\opencode\\go\\bin\\go.exe`，符合本機 portable Go 工作流。
+
+### 驗證
+
+- 本機已跑 `gofmt`、`go test -count=1 ./...`、`go vet ./...`。
+- `scripts/dev.ps1 -Task vet` 已可執行。
+- 後續 commit 前仍需 `git diff --check`，push 後以 GitHub Actions 驗證 Linux race / Docker build。

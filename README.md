@@ -69,6 +69,7 @@ go build -o ai-hub ./cmd/ai-hub
 | `DB_MAX_OPEN_CONNS` | sqlite=1, 其他=10 | 最大開啟連線數 |
 | `DB_MAX_IDLE_CONNS` | sqlite=1, 其他=5 | 最大閒置連線數 |
 | `DB_CONN_MAX_LIFETIME` | 雲端=`30m` | Go duration,例如 `15m`、`1h`。SQLite 留空 |
+| `DB_RETENTION_DAYS` | `0` | 呼叫日誌保留天數；`0` 表示不自動刪除 |
 | `CONFIG_PATH` | `config.json` | 配置檔路徑 |
 | `ENABLE_METRICS` | `1` | 是否記錄統計 |
 
@@ -266,6 +267,7 @@ print(resp.choices[0].message.content)
 │   ├── ci.yml               # 測試 + 多架構 build 驗證
 │   ├── docker-publish.yml   # 推送多架構鏡像到 ghcr.io
 │   └── release.yml          # 建立 GitHub Release 並上傳跨平台二進制
+├── scripts/dev.ps1      # 本機 fmt/test/vet/check 便利腳本
 ├── Dockerfile           # 多階段 + distroless,純靜態
 ├── docker-compose.yml
 └── config.example.json
@@ -298,7 +300,7 @@ ghcr.io/s12ryt/docker-ai-proxy:sha-abc1234
 
 - **務必修改** `ADMIN_TOKEN`,它能讀取所有調用日誌
 - 生產環境建議在前面套一層 TLS(Caddy / Nginx / Cloudflare)
-- `data/ai-hub.db` 內含調用元數據(無 prompt 內容),自行管理保留週期
+- `data/ai-hub.db` 內含調用元數據(無 prompt 內容)，可用 `DB_RETENTION_DAYS` 自動清理舊紀錄；設為 `0` 時請自行管理保留週期
 
 ## 📜 License
 

@@ -25,20 +25,21 @@ type Provider struct {
 
 // Config is the application configuration.
 type Config struct {
-	Listen         string     `json:"listen"`
-	AdminToken     string     `json:"admin_token"`
-	AccessTokens   []string   `json:"access_tokens"`
-	TelegramUserID string     `json:"telegram_user_id"`
-	TelegramBotID  string     `json:"telegram_bot_id"`
-	DBPath         string     `json:"db_path"`
-	DBDriver       string     `json:"db_driver"`
-	DBDSN          string     `json:"db_dsn"`
-	DBMaxOpen      int        `json:"db_max_open_conns"`
-	DBMaxIdle      int        `json:"db_max_idle_conns"`
-	DBConnMaxLife  string     `json:"db_conn_max_lifetime"`
-	Providers      []Provider `json:"providers"`
-	EnableMetrics  bool       `json:"enable_metrics"`
-	StartedAt      time.Time  `json:"-"`
+	Listen          string     `json:"listen"`
+	AdminToken      string     `json:"admin_token"`
+	AccessTokens    []string   `json:"access_tokens"`
+	TelegramUserID  string     `json:"telegram_user_id"`
+	TelegramBotID   string     `json:"telegram_bot_id"`
+	DBPath          string     `json:"db_path"`
+	DBDriver        string     `json:"db_driver"`
+	DBDSN           string     `json:"db_dsn"`
+	DBMaxOpen       int        `json:"db_max_open_conns"`
+	DBMaxIdle       int        `json:"db_max_idle_conns"`
+	DBConnMaxLife   string     `json:"db_conn_max_lifetime"`
+	DBRetentionDays int        `json:"db_retention_days"`
+	Providers       []Provider `json:"providers"`
+	EnableMetrics   bool       `json:"enable_metrics"`
+	StartedAt       time.Time  `json:"-"`
 
 	mu *sync.RWMutex
 }
@@ -79,6 +80,7 @@ func Reload() {
 	current.DBMaxOpen = c.DBMaxOpen
 	current.DBMaxIdle = c.DBMaxIdle
 	current.DBConnMaxLife = c.DBConnMaxLife
+	current.DBRetentionDays = c.DBRetentionDays
 	current.Providers = c.Providers
 	current.EnableMetrics = c.EnableMetrics
 }
@@ -207,6 +209,9 @@ func load() *Config {
 			if fileCfg.DBConnMaxLife != "" {
 				c.DBConnMaxLife = fileCfg.DBConnMaxLife
 			}
+			if fileCfg.DBRetentionDays > 0 {
+				c.DBRetentionDays = fileCfg.DBRetentionDays
+			}
 			if len(fileCfg.Providers) > 0 {
 				c.Providers = fileCfg.Providers
 			}
@@ -270,6 +275,9 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("DB_CONN_MAX_LIFETIME"); v != "" {
 		c.DBConnMaxLife = v
+	}
+	if v := envInt("DB_RETENTION_DAYS", c.DBRetentionDays); v != c.DBRetentionDays {
+		c.DBRetentionDays = v
 	}
 	if v := os.Getenv("ENABLE_METRICS"); v != "" {
 		c.EnableMetrics = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")

@@ -106,8 +106,7 @@ func postgresDialect() dialect {
 }
 
 // rebindPostgres converts `?` placeholders into `$N`, ignoring `?` inside
-// single-quoted strings. Comments are not stripped — our queries are all
-// hand-written and contain none.
+// single-quoted strings and SQL comments (`-- ...` / `/* ... */`).
 func rebindPostgres(q string) string {
 	var b strings.Builder
 	b.Grow(len(q) + 8)
@@ -116,17 +115,45 @@ func rebindPostgres(q string) string {
 	for i := 0; i < len(q); i++ {
 		c := q[i]
 		switch {
-		case c == '\'':
-			// Handle escaped quote `''` inside a string literal.
-			if inQuote && i+1 < len(q) && q[i+1] == '\'' {
+		case inQuote:
+			if c == '\'' && i+1 < len(q) && q[i+1] == '\'' {
 				b.WriteByte('\'')
 				b.WriteByte('\'')
 				i++
 				continue
 			}
-			inQuote = !inQuote
+			if c == '\'' {
+				inQuote = false
+			}
 			b.WriteByte(c)
-		case c == '?' && !inQuote:
+		case c == '\'':
+			inQuote = true
+			b.WriteByte(c)
+		case c == '-' && i+1 < len(q) && q[i+1] == '-':
+			b.WriteByte(c)
+			i++
+			b.WriteByte(q[i])
+			for i+1 < len(q) {
+				i++
+				b.WriteByte(q[i])
+				if q[i] == '\n' {
+					break
+				}
+			}
+		case c == '/' && i+1 < len(q) && q[i+1] == '*':
+			b.WriteByte(c)
+			i++
+			b.WriteByte(q[i])
+			for i+1 < len(q) {
+				i++
+				b.WriteByte(q[i])
+				if q[i] == '*' && i+1 < len(q) && q[i+1] == '/' {
+					i++
+					b.WriteByte(q[i])
+					break
+				}
+			}
+		case c == '?':
 			n++
 			fmt.Fprintf(&b, "$%d", n)
 		default:

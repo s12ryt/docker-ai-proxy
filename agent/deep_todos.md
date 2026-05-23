@@ -109,6 +109,14 @@
 - [x] **P2 Bug 12**：`loggingResponseWriter` 補 `io.ReaderFrom`，避免 wrapper 關閉未來 `io.Copy` / sendfile fast path。
 - [x] **P3 Bug 18**：`main.go` 的 `-version` / `--version` 參數改為大小寫不敏感。
 - [x] 本機 portable Go 驗證：`gofmt` + `go test -count=1 ./...` + `go vet ./...` 全通過（Windows 無 CGO，`-race` 仍由 CI Linux runner 驗證）。
+- [x] CI 驗證：`c78bf7f` 後 `ci.yml` 與 `docker-publish.yml` 全綠；P1–P3 backlog 實作切片完成。
+
+### P2/P3 backlog 實作切片 · 2026-05-23
+- [x] **P2 DB retention job**：`config.Config` 新增 `DBRetentionDays` / env `DB_RETENTION_DAYS` / JSON `db_retention_days`；`cmd/ai-hub` 啟動後若 days > 0 會先清一次並每 24h 背景清理舊呼叫紀錄。
+- [x] `internal/store.Store` 新增 `DeleteCallsBefore` / `ApplyRetention`，透過 dialect rebind 兼容 SQLite / MySQL / PostgreSQL；測試覆蓋啟用與 disabled no-op。
+- [x] **P2 Bug 16**：`rebindPostgres` 現在會略過 `-- line comment` 與 `/* block comment */` 內的 `?`，保留既有字串 literal / `''` escape 處理；測試補註釋案例。
+- [x] **P3 本機開發**：新增 `scripts/dev.ps1`，支援 `fmt` / `test` / `vet` / `check` / `all`，會優先使用 PATH 上的 Go，否則回退到 `%TEMP%\\opencode\\go\\bin\\go.exe`。
+- [x] README / config.example.json / agent 文件補 `DB_RETENTION_DAYS`、retention 行為與 dev script 說明。
 
 ## 已完成 (第二輪 bug 排查 · 2026-05-22)
 
@@ -132,7 +140,7 @@
 
 ### P0 · 阻塞性
 
-- [ ] **P1–P3 backlog 實作切片 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
+- [ ] **DB retention / rebind / dev script 實作切片 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
 
 ### P1 · 重要（功能不完整或正確性問題）
 
@@ -149,14 +157,14 @@
 - [ ] **provider 健康檢查**：失敗計數 + 暫時冷卻（circuit breaker），讓 KeyPicker 跳過壞 key。
 - [x] **dashboard 顯示 token 統計**：token usage 寫入後，既有 dashboard summary / recent calls token 欄位可顯示真實資料。
 - [ ] **DB schema migration 工具**：現在三套 schema 是 dialect 字串硬編碼，加欄位要三邊改。可導入 `golang-migrate` 或 `pressly/goose` 統一管理版本。
-- [ ] **DB retention job**：背景定時 `DELETE FROM ai_calls WHERE created_at < NOW() - INTERVAL ?`（雲端 DB 必要）。sqlite 時代靠刪檔，現在切雲端後沒清理機制會無限長大。
+- [x] **DB retention job**：新增 `DB_RETENTION_DAYS` / `db_retention_days`，啟動後立即清理一次並每 24h 背景刪除超齡 calls；`0` 表示停用。
 - [x] **DB 連線健康監控**：`/api/runtime` 暴露 `db_stats`（driver/open/in_use/idle/wait_count/wait_duration_ms），方便診斷雲端連線池異常。
-- [ ] **（觀察中）Bug 16 · `rebindPostgres` 註釋處理**：目前 query 全是手寫硬編無註釋，未來引入 query builder 時再補 `--` / `/* */` 略過邏輯。
+- [x] **Bug 16 · `rebindPostgres` 註釋處理**：已略過 `--` line comment 與 `/* */` block comment 內的 `?`，並保留字串 literal / `''` escape 處理。
 - [x] **Bug 12 · loggingResponseWriter 實作 `io.ReaderFrom`**：已補 `ReadFrom`，避免 wrapper 關閉未來 `io.Copy` / sendfile fast path。
 
 ### P3 · 體驗與品質
 
-- [ ] **本機開發**：建議補一份 `Makefile` 或 `scripts/dev.ps1`，方便沒 Go 環境用 Docker 跑測試（例如 `docker run --rm -v ${PWD}:/src -w /src golang:1.22 go test ./...`）。
+- [x] **本機開發**：新增 `scripts/dev.ps1`，支援 `fmt` / `test` / `vet` / `check` / `all`，會優先使用 PATH 上的 Go，否則回退到 `%TEMP%\\opencode\\go\\bin\\go.exe`。
 - [x] **更多 e2e 測試**：補強 token usage、SSE stream usage、runtime db_stats、reload method/status 測試；先前多協定階段已覆蓋 SSE 流式與 Anthropic/Gemini 路徑。
 - [ ] **dashboard.js 切換 provider enable/disable** 的 UI（目前只能改 config.json + 重啟）。
 - [ ] **README 補英文版**（README.en.md）給國際用戶。

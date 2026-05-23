@@ -12,6 +12,7 @@
   "db_max_open_conns": 0,
   "db_max_idle_conns": 0,
   "db_conn_max_lifetime": "",
+  "db_retention_days": 0,
 
   "_db_examples": {
     "sqlite": { "db_driver": "sqlite", "db_path": "/data/ai-hub.db" },

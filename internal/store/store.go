@@ -163,6 +163,30 @@ func (s *Store) LogCall(ctx context.Context, r CallRecord) error {
 	return err
 }
 
+// DeleteCallsBefore removes call records older than the provided timestamp and
+// returns the number of deleted rows. It is used by the retention job and is
+// safe for all supported SQL dialects through placeholder rebinding.
+func (s *Store) DeleteCallsBefore(ctx context.Context, before time.Time) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, s.dialect.rebind(`DELETE FROM calls WHERE ts < ?`), before.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ApplyRetention deletes records older than the configured number of days. A
+// non-positive day count disables retention and is treated as a no-op.
+func (s *Store) ApplyRetention(ctx context.Context, days int) (int64, error) {
+	if days <= 0 {
+		return 0, nil
+	}
+	before := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+	return s.DeleteCallsBefore(ctx, before)
+}
+
 // Summary aggregates traffic by provider over a time window.
 type Summary struct {
 	TotalCalls   int64                   `json:"total_calls"`

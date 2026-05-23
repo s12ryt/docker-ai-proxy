@@ -52,6 +52,7 @@ func main() {
 		log.Fatalf("open store: %v", err)
 	}
 	log.Printf("ai-hub: store driver=%s", st.Driver())
+	stopRetention := startRetentionJob(st, cfg.DBRetentionDays)
 
 	prx := proxy.New(cfg, st)
 	srv := server.New(cfg, st, prx)
@@ -73,9 +74,48 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	<-sigs
 	log.Printf("shutting down…")
+	stopRetention()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)
 	_ = srv.Shutdown(ctx)
+}
+
+func startRetentionJob(st *store.Store, days int) context.CancelFunc {
+	if st == nil || days <= 0 {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	run := func() {
+		retentionCtx, retentionCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer retentionCancel()
+		deleted, err := st.ApplyRetention(retentionCtx, days)
+		if err != nil {
+			log.Printf("[retention] delete calls older than %d days: %v", days, err)
+			return
+		}
+		if deleted > 0 {
+			log.Printf("[retention] deleted %d call records older than %d days", deleted, days)
+		}
+	}
+	go func() {
+		defer close(done)
+		run()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				run()
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }

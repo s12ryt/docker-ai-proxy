@@ -109,6 +109,7 @@ func TestLoadEnvOverridesFileConfig(t *testing.T) {
 		"db_max_open_conns": 2,
 		"db_max_idle_conns": 1,
 		"db_conn_max_lifetime": "5m",
+		"db_retention_days": 7,
 		"enable_metrics": true
 	}`)
 	t.Setenv("CONFIG_PATH", path)
@@ -118,6 +119,7 @@ func TestLoadEnvOverridesFileConfig(t *testing.T) {
 	t.Setenv("DB_MAX_OPEN_CONNS", "17")
 	t.Setenv("DB_MAX_IDLE_CONNS", "9")
 	t.Setenv("DB_CONN_MAX_LIFETIME", "45m")
+	t.Setenv("DB_RETENTION_DAYS", "30")
 	t.Setenv("ENABLE_METRICS", "false")
 
 	c := load()
@@ -138,6 +140,9 @@ func TestLoadEnvOverridesFileConfig(t *testing.T) {
 	}
 	if c.DBConnMaxLife != "45m" {
 		t.Fatalf("db conn max lifetime should prefer env, got %q", c.DBConnMaxLife)
+	}
+	if c.DBRetentionDays != 30 {
+		t.Fatalf("db retention days should prefer env, got %d", c.DBRetentionDays)
 	}
 	if c.EnableMetrics {
 		t.Fatal("enable metrics should prefer env false")

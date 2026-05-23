@@ -55,6 +55,9 @@ func TestRebindPostgres(t *testing.T) {
 		{"WHERE label = 'why?' AND id = ?", "WHERE label = 'why?' AND id = $1"},
 		// Escaped `''` inside string literals must not toggle the quote state.
 		{"WHERE x = 'it''s ok?' AND y = ?", "WHERE x = 'it''s ok?' AND y = $1"},
+		// Placeholders inside SQL comments must be preserved untouched.
+		{"-- why?\nWHERE id = ?", "-- why?\nWHERE id = $1"},
+		{"WHERE /* why? */ id = ?", "WHERE /* why? */ id = $1"},
 	}
 	for _, c := range cases {
 		got := rebindPostgres(c.in)

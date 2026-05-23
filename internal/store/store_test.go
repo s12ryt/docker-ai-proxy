@@ -88,3 +88,49 @@ func TestSummarize_EmptyWindow(t *testing.T) {
 		t.Fatalf("expected zero: %+v", sum)
 	}
 }
+
+func TestApplyRetention_DeletesOldCalls(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	oldCall := CallRecord{Timestamp: now.Add(-48 * time.Hour), Provider: "openai", Model: "old", Path: "/old", Status: 200}
+	newCall := CallRecord{Timestamp: now.Add(-2 * time.Hour), Provider: "openai", Model: "new", Path: "/new", Status: 200}
+	if err := st.LogCall(ctx, oldCall); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.LogCall(ctx, newCall); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := st.ApplyRetention(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted=%d, want 1", deleted)
+	}
+
+	rows, err := st.RecentCalls(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Model != "new" {
+		t.Fatalf("retention kept wrong rows: %+v", rows)
+	}
+}
+
+func TestApplyRetention_Disabled(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	if err := st.LogCall(ctx, CallRecord{Provider: "openai", Model: "m", Path: "/x", Status: 200}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := st.ApplyRetention(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 0 {
+		t.Fatalf("disabled retention deleted %d rows", deleted)
+	}
+}
