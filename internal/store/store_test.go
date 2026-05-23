@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,6 +17,95 @@ func newTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st
+}
+
+func TestCreateInitialAdminNormalizesAndPreventsSecondBootstrap(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	created, err := st.CreateInitialAdmin(ctx, User{Username: " AdminUser ", PasswordHash: "hash", Role: RoleUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Username != "adminuser" || created.Role != RoleAdmin || created.ID == 0 {
+		t.Fatalf("unexpected initial admin: %+v", created)
+	}
+	if created.PasswordHash == "" {
+		t.Fatalf("expected password hash to be stored")
+	}
+
+	_, err = st.CreateInitialAdmin(ctx, User{Username: "other", PasswordHash: "hash", Role: RoleAdmin})
+	if !errors.Is(err, ErrInitialAdminExists) {
+		t.Fatalf("expected ErrInitialAdminExists, got %v", err)
+	}
+
+	count, err := st.CountUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("count=%d, want 1", count)
+	}
+}
+
+func TestCreateInitialAdminConcurrentOnlyOneWins(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, username := range []string{"first", "second"} {
+		wg.Add(1)
+		go func(username string) {
+			defer wg.Done()
+			_, err := st.CreateInitialAdmin(ctx, User{Username: username, PasswordHash: "hash"})
+			errs <- err
+		}(username)
+	}
+	wg.Wait()
+	close(errs)
+
+	successes := 0
+	conflicts := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+			continue
+		}
+		if errors.Is(err, ErrInitialAdminExists) {
+			conflicts++
+			continue
+		}
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("successes=%d conflicts=%d, want 1/1", successes, conflicts)
+	}
+}
+
+func TestCreateUserValidatesAndFindsNormalizedUsername(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	created, err := st.CreateUser(ctx, User{Username: " MixedCase ", PasswordHash: "hash", Role: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Username != "mixedcase" || created.Role != RoleUser {
+		t.Fatalf("unexpected user: %+v", created)
+	}
+
+	found, err := st.FindUserByUsername(ctx, " MIXEDCASE ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.ID != created.ID || found.PasswordHash != "hash" {
+		t.Fatalf("found wrong user: %+v", found)
+	}
+
+	if _, err := st.CreateUser(ctx, User{Username: "bad-role", PasswordHash: "hash", Role: "owner"}); err == nil {
+		t.Fatalf("expected invalid role error")
+	}
 }
 
 func TestLogAndSummarize(t *testing.T) {

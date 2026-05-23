@@ -28,6 +28,11 @@ func sqliteDialect() dialect {
 		name:       "sqlite",
 		driverName: "sqlite",
 		schema: []string{
+			`CREATE TABLE IF NOT EXISTS bootstrap_state (
+    state_key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);`,
 			`CREATE TABLE IF NOT EXISTS calls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts INTEGER NOT NULL,
@@ -43,8 +48,19 @@ func sqliteDialect() dialect {
     client_ip TEXT,
     err TEXT
 );`,
+			`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    disabled INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    last_login_at INTEGER
+);`,
 			`CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);`,
 			`CREATE INDEX IF NOT EXISTS idx_calls_provider_ts ON calls(provider, ts);`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);`,
 		},
 		rebind: func(q string) string { return q },
 	}
@@ -55,6 +71,12 @@ func mysqlDialect() dialect {
 		name:       "mysql",
 		driverName: "mysql",
 		schema: []string{
+			`CREATE TABLE IF NOT EXISTS bootstrap_state (
+    state_key VARCHAR(128) NOT NULL,
+    value TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (state_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 			`CREATE TABLE IF NOT EXISTS calls (
     id BIGINT NOT NULL AUTO_INCREMENT,
     ts BIGINT NOT NULL,
@@ -73,6 +95,18 @@ func mysqlDialect() dialect {
     KEY idx_calls_ts (ts),
     KEY idx_calls_provider_ts (provider, ts)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS users (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    username VARCHAR(64) NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role VARCHAR(16) NOT NULL DEFAULT 'user',
+    disabled BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    last_login_at BIGINT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY idx_users_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 		},
 		rebind: func(q string) string { return q },
 	}
@@ -83,6 +117,11 @@ func postgresDialect() dialect {
 		name:       "postgres",
 		driverName: "pgx",
 		schema: []string{
+			`CREATE TABLE IF NOT EXISTS bootstrap_state (
+    state_key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    created_at BIGINT NOT NULL
+);`,
 			`CREATE TABLE IF NOT EXISTS calls (
     id BIGSERIAL PRIMARY KEY,
     ts BIGINT NOT NULL,
@@ -98,8 +137,19 @@ func postgresDialect() dialect {
     client_ip TEXT,
     err TEXT
 );`,
+			`CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    disabled BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    last_login_at BIGINT
+);`,
 			`CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);`,
 			`CREATE INDEX IF NOT EXISTS idx_calls_provider_ts ON calls(provider, ts);`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);`,
 		},
 		rebind: rebindPostgres,
 	}

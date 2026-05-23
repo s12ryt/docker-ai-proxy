@@ -163,6 +163,42 @@ func (s *Store) LogCall(ctx context.Context, r CallRecord) error {
 	return err
 }
 
+// CreateInitialAdmin atomically initializes the first administrator.
+//
+// A sentinel row is inserted in the same transaction before creating the user.
+// This prevents the classic race where two first-run requests choose different
+// usernames and both observe COUNT(users)=0 before either insert commits.
+func (s *Store) CreateInitialAdmin(ctx context.Context, u User) (User, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, err
+	}
+	defer tx.Rollback()
+
+	count, err := s.countUsers(ctx, tx)
+	if err != nil {
+		return User{}, err
+	}
+	if count > 0 {
+		return User{}, ErrInitialAdminExists
+	}
+
+	_, err = tx.ExecContext(ctx, s.dialect.rebind(`INSERT INTO bootstrap_state(state_key, value, created_at) VALUES (?, ?, ?)`), "initial_admin_created", "1", time.Now().UnixMilli())
+	if err != nil {
+		return User{}, ErrInitialAdminExists
+	}
+
+	u.Role = RoleAdmin
+	created, err := s.createUser(ctx, tx, u)
+	if err != nil {
+		return User{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, err
+	}
+	return created, nil
+}
+
 // DeleteCallsBefore removes call records older than the provided timestamp and
 // returns the number of deleted rows. It is used by the retention job and is
 // safe for all supported SQL dialects through placeholder rebinding.
