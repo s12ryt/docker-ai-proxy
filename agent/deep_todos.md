@@ -91,6 +91,13 @@
 - [x] README API 範例補齊 `/v1/chat/completions`、`/v1/messages`、Gemini `:generateContent`、OpenAI 常用端點表與非 OpenAI-compatible provider 的 501 行為。
 - [x] `config.example.json` 補 Gemini provider，更新 OpenAI/Anthropic 範例 models，涵蓋 embeddings/images/audio 常用模型。
 - [x] `agent/memory.md`、`agent/deep_todos.md`、`agent/項目表.md` 同步最終功能面與 backlog 狀態。
+- [x] CI 驗證：`cc817ad` 後 `ci.yml` 與 `docker-publish.yml` 全綠；Stage 7 完成。
+
+### OpenAI Responses API · 2026-05-23
+- [x] `internal/proxy/proxy.go` 新增 `ServeResponses`：OpenAI-compatible provider pass-through 到 `/v1/responses`；`stream:true` 沿用 SSE raw pass-through。
+- [x] `internal/server/server.go` 接上 `/v1/responses`，沿用 `requireAccessToken`。
+- [x] 新增 e2e 測試：`TestServeResponses_OpenAICompatibleUpstream`、`TestServeResponses_StreamPassThrough`、`TestServeResponses_NonOpenAIProviderRejected`。
+- [x] README / agent 文件補 OpenAI Responses API 支援說明；非 OpenAI-compatible provider 明確回 501。
 
 ## 已完成 (第二輪 bug 排查 · 2026-05-22)
 
@@ -114,7 +121,7 @@
 
 ### P0 · 阻塞性
 
-- [ ] **Stage 7 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
+- [ ] **Responses API CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
 
 ### P1 · 重要（功能不完整或正確性問題）
 

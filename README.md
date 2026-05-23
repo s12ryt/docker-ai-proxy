@@ -1,6 +1,6 @@
 # AI Hub · 多模型聚合分發網關
 
-> 用 Go 撰寫的 **多協定 AI 模型聚合網關**。把 OpenAI、Anthropic、Gemini、DeepSeek 與任意 OpenAI 相容端點整合進**單一 API**；支援 OpenAI / Anthropic / Gemini chat 協定互轉、SSE 串流翻譯、OpenAI embeddings/completions/images/audio 端點轉發，內建密鑰池、SQLite/MySQL/PostgreSQL 觀測、漂亮的暗黑玻璃擬態控制台 — 單檔靜態二進制，Docker 鏡像 < 25 MB。
+> 用 Go 撰寫的 **多協定 AI 模型聚合網關**。把 OpenAI、Anthropic、Gemini、DeepSeek 與任意 OpenAI 相容端點整合進**單一 API**；支援 OpenAI / Anthropic / Gemini chat 協定互轉、SSE 串流翻譯、OpenAI Responses/embeddings/completions/images/audio 端點轉發，內建密鑰池、SQLite/MySQL/PostgreSQL 觀測、漂亮的暗黑玻璃擬態控制台 — 單檔靜態二進制，Docker 鏡像 < 25 MB。
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-22d3ee)
 ![Go](https://img.shields.io/badge/Go-1.22-7c3aed)
@@ -11,7 +11,7 @@
 ## ✨ 特性
 
 - **多協定 Chat API**：OpenAI `/v1/chat/completions`、Anthropic `/v1/messages`、Gemini `:generateContent` 可互相接入與轉出
-- **OpenAI 常用端點**：`/v1/embeddings`、`/v1/completions`、`/v1/images/*`、`/v1/audio/*` 對 OpenAI-compatible provider 透傳
+- **OpenAI 常用端點**：`/v1/responses`、`/v1/embeddings`、`/v1/completions`、`/v1/images/*`、`/v1/audio/*` 對 OpenAI-compatible provider 透傳
 - **多供應商**：OpenAI / Anthropic / Gemini / DeepSeek，以及任何 OpenAI 相容端點
 - **流式 SSE 翻譯**：OpenAI chunk、Anthropic event stream、Gemini streamGenerateContent 文字 delta 雙向轉譯
 - **密鑰池**：每個供應商可配置多把 Key，自動輪轉
@@ -209,6 +209,7 @@ curl http://localhost:8080/v1beta/models/gemini-1.5-pro:generateContent \
 
 | 端點 | 說明 |
 | --- | --- |
+| `POST /v1/responses` | OpenAI Responses API，支援 SSE pass-through |
 | `POST /v1/embeddings` | Embeddings |
 | `POST /v1/completions` | Legacy text completions，支援 SSE pass-through |
 | `POST /v1/images/*` | Images，例如 `/v1/images/generations` |

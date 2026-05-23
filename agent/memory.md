@@ -529,3 +529,42 @@
 ### 驗證
 
 - Stage 7 是文件/config 範例更新；仍需在 commit 前跑 `go test -count=1 ./...`、`go vet ./...`、`git diff --check`，並以 CI 驗證最終狀態。
+
+---
+
+## 2026-05-23 · OpenAI Responses API 支援
+
+### 需求
+
+使用者要求：「對 openai 的 Response 協議也要提供支持」。此處指 OpenAI Responses API `POST /v1/responses`，補齊在 Chat Completions 之外的新一代 OpenAI 回應協議。
+
+### 實作策略
+
+Responses API 採 **OpenAI-compatible raw pass-through**：
+
+- 僅支援 OpenAI / DeepSeek / 其他 OpenAI 相容 provider。
+- 透過既有 `serveOpenAICompatibleJSONEndpoint` 解析 JSON、取 `model`、走 `ProviderForModel`、重寫 upstream model、轉發 `/v1/responses`。
+- `stream:true` 沿用 `serveStreamThrough`，保留 OpenAI Responses SSE 事件原樣透傳並補反代防緩衝 header。
+- Anthropic/Gemini 等非 OpenAI-compatible provider 明確回 `501 Not Implemented`，避免錯誤假翻譯。
+
+### 主要變更
+
+1. **`internal/proxy/proxy.go`**
+   - 新增 `ServeResponses`，呼叫 `serveOpenAICompatibleJSONEndpoint(w, r, "/v1/responses", true)`。
+
+2. **`internal/server/server.go`**
+   - 新增 `/v1/responses` route，沿用 `requireAccessToken`。
+
+3. **測試**
+   - `TestServeResponses_OpenAICompatibleUpstream`：fake upstream 驗證 `/v1/responses` path、Bearer auth、JSON body model/input、response pass-through、provider header 與 store log。
+   - `TestServeResponses_StreamPassThrough`：Responses SSE event/data 原樣透傳，並驗證 `X-Accel-Buffering: no`。
+   - `TestServeResponses_NonOpenAIProviderRejected`：Anthropic provider 對 Responses API 明確回 501。
+
+4. **文件**
+   - README 特性與 OpenAI 常用端點表補 `/v1/responses`。
+   - agent 文件更新 Responses API 支援與後續 CI 驗證項。
+
+### 驗證
+
+- 本機已跑 `gofmt`、`go test -count=1 ./...`、`go vet ./...`、`git diff --check`；`diff --check` 只有 Windows autocrlf warning。
+- commit/push 後仍需等 GitHub Actions `ci.yml` 與 `docker-publish.yml` 全綠。

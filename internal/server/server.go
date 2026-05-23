@@ -54,6 +54,7 @@ func (s *Server) routes() {
 	})
 
 	s.mux.Handle("/v1/chat/completions", s.requireAccessToken(http.HandlerFunc(s.prx.ServeChatCompletions)))
+	s.mux.Handle("/v1/responses", s.requireAccessToken(http.HandlerFunc(s.prx.ServeResponses)))
 	s.mux.Handle("/v1/embeddings", s.requireAccessToken(http.HandlerFunc(s.prx.ServeEmbeddings)))
 	s.mux.Handle("/v1/completions", s.requireAccessToken(http.HandlerFunc(s.prx.ServeCompletions)))
 	s.mux.Handle("/v1/images/", s.requireAccessToken(http.HandlerFunc(s.prx.ServeImages)))

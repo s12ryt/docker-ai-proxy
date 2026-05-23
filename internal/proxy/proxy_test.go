@@ -842,6 +842,138 @@ func TestServeGeminiGenerateContent_OpenAIStreamingUpstream(t *testing.T) {
 	}
 }
 
+func TestServeResponses_OpenAICompatibleUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var capturedPath, capturedAuth string
+	var capturedBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_test",
+			"object": "response",
+			"model":  capturedBody["model"],
+			"output": []any{map[string]any{
+				"type": "message",
+				"role": "assistant",
+				"content": []any{map[string]any{
+					"type": "output_text",
+					"text": "hello response",
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	st, err := store.OpenSQLite(filepath.Join(tmp, "responses.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk-resp"},
+		Models:     []string{"gpt-4o-mini"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, st)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		bytes.NewBufferString(`{"model":"gpt-4o-mini","input":"hello"}`))
+	rec := httptest.NewRecorder()
+	p.ServeResponses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	cPath, cAuth, cBody := capturedPath, capturedAuth, capturedBody
+	mu.Unlock()
+	if !strings.HasSuffix(cPath, "/v1/responses") {
+		t.Fatalf("expected responses path, got %s", cPath)
+	}
+	if cAuth != "Bearer sk-resp" {
+		t.Fatalf("expected bearer auth, got %q", cAuth)
+	}
+	if cBody["model"] != "gpt-4o-mini" || cBody["input"] != "hello" {
+		t.Fatalf("unexpected upstream body: %v", cBody)
+	}
+	if got := rec.Header().Get("X-AI-Hub-Provider"); got != "openai" {
+		t.Fatalf("expected provider header, got %q", got)
+	}
+	if !strings.Contains(rec.Body.String(), "hello response") {
+		t.Fatalf("expected upstream response passthrough, got %s", rec.Body.String())
+	}
+	rows, err := st.RecentCalls(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Status != 200 || rows[0].Provider != "openai" || rows[0].Path != "/v1/responses" {
+		t.Fatalf("bad log: %+v", rows)
+	}
+}
+
+func TestServeResponses_StreamPassThrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: response.output_text.delta\n")
+		_, _ = io.WriteString(w, `data: {"delta":"hi"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "openai", Enabled: true,
+		BaseURL:    upstream.URL,
+		APIKeys:    []string{"sk"},
+		Models:     []string{"gpt-4o-mini"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		bytes.NewBufferString(`{"model":"gpt-4o-mini","input":"hello","stream":true}`))
+	rec := httptest.NewRecorder()
+	p.ServeResponses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "event: response.output_text.delta") || !strings.Contains(rec.Body.String(), `"delta":"hi"`) {
+		t.Fatalf("expected Responses SSE passthrough, got %s", rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("expected X-Accel-Buffering=no, got %q", got)
+	}
+}
+
+func TestServeResponses_NonOpenAIProviderRejected(t *testing.T) {
+	cfg := &config.Config{Providers: []config.Provider{{
+		Name: "anthropic", Enabled: true,
+		BaseURL:    "https://api.anthropic.com",
+		APIKeys:    []string{"ak"},
+		Models:     []string{"claude-3-5-sonnet-20240620"},
+		TimeoutSec: 10,
+	}}}
+	p := New(cfg, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		bytes.NewBufferString(`{"model":"claude-3-5-sonnet-20240620","input":"hello"}`))
+	rec := httptest.NewRecorder()
+	p.ServeResponses(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestServeEmbeddings_OpenAICompatibleUpstream(t *testing.T) {
 	var mu sync.Mutex
 	var capturedPath, capturedAuth string

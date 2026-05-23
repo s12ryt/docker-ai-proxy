@@ -196,6 +196,11 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 	p.serveStreamThrough(w, resp, provider.Name, stream, &rec)
 }
 
+// ServeResponses handles OpenAI-compatible `/v1/responses` requests.
+func (p *Proxy) ServeResponses(w http.ResponseWriter, r *http.Request) {
+	p.serveOpenAICompatibleJSONEndpoint(w, r, "/v1/responses", true)
+}
+
 // ServeEmbeddings handles OpenAI-compatible `/v1/embeddings` requests.
 func (p *Proxy) ServeEmbeddings(w http.ResponseWriter, r *http.Request) {
 	p.serveOpenAICompatibleJSONEndpoint(w, r, "/v1/embeddings", false)
