@@ -27,24 +27,24 @@ type Provider struct {
 
 // Config is the application configuration.
 type Config struct {
-	Listen          string     `json:"listen"`
-	AdminToken      string     `json:"admin_token"`
-	AccessTokens    []string   `json:"access_tokens"`
-	TelegramUserID  string     `json:"telegram_user_id"`
-	TelegramBotID   string     `json:"telegram_bot_id"`
-	DBPath          string     `json:"db_path"`
-	DBDriver        string     `json:"db_driver"`
-	DBDSN           string     `json:"db_dsn"`
-	DBMaxOpen       int        `json:"db_max_open_conns"`
-	DBMaxIdle       int        `json:"db_max_idle_conns"`
-	DBConnMaxLife   string     `json:"db_conn_max_lifetime"`
-	DBRetentionDays int        `json:"db_retention_days"`
-	AuthJWTSecret    string     `json:"auth_jwt_secret"`
-	AuthCookieSecure bool      `json:"auth_cookie_secure"`
-	AuthSessionTTL   string     `json:"auth_session_ttl"`
-	Providers       []Provider `json:"providers"`
-	EnableMetrics   bool       `json:"enable_metrics"`
-	StartedAt       time.Time  `json:"-"`
+	Listen            string     `json:"listen"`
+	AdminToken        string     `json:"admin_token"`
+	AccessTokens      []string   `json:"access_tokens"`
+	TelegramUserID    string     `json:"telegram_user_id"`
+	TelegramBotID     string     `json:"telegram_bot_id"`
+	DBPath            string     `json:"db_path"`
+	DBDriver          string     `json:"db_driver"`
+	DBDSN             string     `json:"db_dsn"`
+	DBMaxOpen         int        `json:"db_max_open_conns"`
+	DBMaxIdle         int        `json:"db_max_idle_conns"`
+	DBConnMaxLife     string     `json:"db_conn_max_lifetime"`
+	DBRetentionDays   int        `json:"db_retention_days"`
+	AuthJWTSecret     string     `json:"auth_jwt_secret"`
+	AuthCookieSecure  bool       `json:"auth_cookie_secure"`
+	AuthSessionTTL    string     `json:"auth_session_ttl"`
+	Providers         []Provider `json:"providers"`
+	EnableMetrics     bool       `json:"enable_metrics"`
+	StartedAt         time.Time  `json:"-"`
 
 	mu *sync.RWMutex
 }
