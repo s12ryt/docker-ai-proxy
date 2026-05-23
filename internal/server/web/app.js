@@ -1,12 +1,8 @@
-// Landing page lightweight stats: pulls /healthz (public) and falls back to
-// localStorage-stored admin token (if user opened dashboard once).
+// Landing page lightweight stats: uses the HttpOnly dashboard session cookie when present.
 (function () {
   document.getElementById("year").textContent = new Date().getFullYear();
 
-  const adminToken = localStorage.getItem("ai-hub-admin-token");
-  if (!adminToken) return;
-
-  fetch("/api/summary?hours=24", { headers: { Authorization: "Bearer " + adminToken } })
+  fetch("/api/summary?hours=24", { credentials: "same-origin" })
     .then((r) => (r.ok ? r.json() : null))
     .then((s) => {
       if (!s) return;
@@ -18,7 +14,7 @@
     })
     .catch(() => {});
 
-  fetch("/api/runtime", { headers: { Authorization: "Bearer " + adminToken } })
+  fetch("/api/runtime", { credentials: "same-origin" })
     .then((r) => (r.ok ? r.json() : null))
     .then((r) => {
       if (!r) return;
