@@ -24,15 +24,16 @@ var webFS embed.FS
 
 // Server wires HTTP routes together.
 type Server struct {
-	cfg   *config.Config
-	store *store.Store
-	prx   *proxy.Proxy
-	mux   *http.ServeMux
+	cfg           *config.Config
+	store         *store.Store
+	prx           *proxy.Proxy
+	mux           *http.ServeMux
+	sessionSecret string
 }
 
 // New builds a configured Server.
 func New(cfg *config.Config, st *store.Store, prx *proxy.Proxy) *Server {
-	s := &Server{cfg: cfg, store: st, prx: prx, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, prx: prx, mux: http.NewServeMux(), sessionSecret: newEphemeralSessionSecret()}
 	s.routes()
 	return s
 }
@@ -64,11 +65,17 @@ func (s *Server) routes() {
 	s.mux.Handle("/v1beta/models/", s.requireAccessToken(http.HandlerFunc(s.prx.ServeGeminiGenerateContent)))
 	s.mux.Handle("/v1/models", s.requireAccessToken(http.HandlerFunc(s.prx.ServeModels)))
 
+	s.mux.Handle("/api/auth/bootstrap", http.HandlerFunc(s.handleBootstrapStatus))
+	s.mux.Handle("/api/auth/login", s.requireSameOriginForMutating(http.HandlerFunc(s.handleLogin)))
+	s.mux.Handle("/api/auth/logout", s.requireSameOriginForMutating(s.requireUser(http.HandlerFunc(s.handleLogout))))
+	s.mux.Handle("/api/auth/profile", s.requireUser(http.HandlerFunc(s.handleProfile)))
+	s.mux.Handle("/api/auth/register", s.requireSameOriginForMutating(s.attachOptionalUser(http.HandlerFunc(s.handleRegister))))
+
 	s.mux.Handle("/api/summary", s.requireAdmin(http.HandlerFunc(s.handleSummary)))
-	s.mux.Handle("/api/providers", s.requireAdmin(http.HandlerFunc(s.handleProviders)))
+	s.mux.Handle("/api/providers", s.requireAdmin(s.requireSameOriginForMutating(http.HandlerFunc(s.handleProviders))))
 	s.mux.Handle("/api/recent", s.requireAdmin(http.HandlerFunc(s.handleRecent)))
 	s.mux.Handle("/api/runtime", s.requireAdmin(http.HandlerFunc(s.handleRuntime)))
-	s.mux.Handle("/api/reload", s.requireAdmin(http.HandlerFunc(s.handleReload)))
+	s.mux.Handle("/api/reload", s.requireAdmin(s.requireSameOriginForMutating(http.HandlerFunc(s.handleReload))))
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
@@ -87,21 +94,48 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
-	snap := s.cfg.Snapshot()
-	out := make([]map[string]any, 0, len(snap.Providers))
-	for _, p := range snap.Providers {
-		out = append(out, map[string]any{
-			"name":         p.Name,
-			"display_name": p.DisplayName,
-			"base_url":     p.BaseURL,
-			"models":       p.Models,
-			"enabled":      p.Enabled,
-			"weight":       p.Weight,
-			"key_count":    len(p.APIKeys),
-			"timeout_sec":  p.TimeoutSec,
-		})
+	switch r.Method {
+	case http.MethodGet:
+		snap := s.cfg.Snapshot()
+		out := make([]map[string]any, 0, len(snap.Providers))
+		for _, p := range snap.Providers {
+			out = append(out, map[string]any{
+				"name":         p.Name,
+				"display_name": p.DisplayName,
+				"base_url":     p.BaseURL,
+				"api_keys":     p.APIKeys,
+				"models":       p.Models,
+				"enabled":      p.Enabled,
+				"weight":       p.Weight,
+				"key_count":    len(p.APIKeys),
+				"timeout_sec":  p.TimeoutSec,
+			})
+		}
+		writeJSON(w, out)
+	case http.MethodPut:
+		var req struct {
+			Providers []config.Provider `json:"providers"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := config.SaveProviders(req.Providers); err != nil {
+			if strings.Contains(err.Error(), "read ") || strings.Contains(err.Error(), "write ") || strings.Contains(err.Error(), "parse ") || strings.Contains(err.Error(), "marshal ") || strings.Contains(err.Error(), "create config dir") {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.cfg.ReplaceProviders(req.Providers); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "config_path": config.ConfigPath()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-	writeJSON(w, out)
 }
 
 func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
@@ -172,21 +206,6 @@ func (s *Server) requireAccessToken(next http.Handler) http.Handler {
 			}
 		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-	})
-}
-
-func (s *Server) requireAdmin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := extractBearer(r)
-		if token == "" {
-			token = r.URL.Query().Get("admin_token")
-		}
-		snap := s.cfg.Snapshot()
-		if token == "" || snap.AdminToken == "" || token != snap.AdminToken {
-			http.Error(w, "admin token required", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
 	})
 }
 

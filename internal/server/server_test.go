@@ -1,10 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/s12ryt/docker-ai-proxy/internal/config"
@@ -109,7 +112,9 @@ func TestReload_MethodAndOK(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/reload?admin_token=test-admin", nil))
+	req := httptest.NewRequest(http.MethodPost, "/api/reload?admin_token=test-admin", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -119,6 +124,162 @@ func TestReload_MethodAndOK(t *testing.T) {
 	}
 	if body["ok"] != true {
 		t.Fatalf("expected ok=true, got %v", body)
+	}
+}
+
+func TestProvidersPutPersistsAndUpdatesRuntimeConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("CONFIG_PATH", configPath)
+
+	s, cfg := newTestServer(t)
+	payload := []byte(`{"providers":[{"name":" local-openai ","display_name":" Local OpenAI ","base_url":" https://api.openai.com/ ","api_keys":[" key-a ","","key-b"],"models":[" gpt-4o-mini ",""],"enabled":true,"weight":0,"timeout_sec":0}]}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/providers?admin_token=test-admin", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, ok := cfg.FindProvider("local-openai")
+	if !ok {
+		t.Fatalf("expected updated provider in runtime config")
+	}
+	if got.BaseURL != "https://api.openai.com" || got.Weight != 1 || got.TimeoutSec != 120 {
+		t.Fatalf("provider was not normalized: %+v", got)
+	}
+	if len(got.APIKeys) != 2 || got.APIKeys[0] != "key-a" || got.APIKeys[1] != "key-b" {
+		t.Fatalf("api keys were not normalized: %+v", got.APIKeys)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved config.Config
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Providers) != 1 || saved.Providers[0].Name != "local-openai" {
+		t.Fatalf("provider was not persisted: %s", string(data))
+	}
+
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/providers?admin_token=test-admin", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var listed []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	keys, ok := listed[0]["api_keys"].([]any)
+	if !ok || len(keys) != 2 {
+		t.Fatalf("expected api_keys in provider list, got %v", listed[0]["api_keys"])
+	}
+}
+
+func TestProvidersPutRejectsInvalidProvider(t *testing.T) {
+	t.Setenv("CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+	s, _ := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPut, "/api/providers?admin_token=test-admin", bytes.NewReader([]byte(`{"providers":[{"name":"bad/name","base_url":"https://example.com"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthBootstrapAndFirstAdminSession(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/auth/bootstrap", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var bootstrap map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &bootstrap); err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap["bootstrap_required"] != true {
+		t.Fatalf("expected bootstrap_required=true, got %v", bootstrap)
+	}
+
+	body := []byte(`{"username":" AdminUser ","password":"super-secret","role":"user"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "password_hash") {
+		t.Fatalf("response leaked password hash: %s", rec.Body.String())
+	}
+	cookie := rec.Result().Cookies()[0]
+	if cookie.Name != sessionCookieName || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("session cookie not hardened: %+v", cookie)
+	}
+	var registered map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &registered); err != nil {
+		t.Fatal(err)
+	}
+	user := registered["user"].(map[string]any)
+	if user["username"] != "adminuser" || user["role"] != store.RoleAdmin {
+		t.Fatalf("first user should be normalized admin, got %v", user)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/auth/profile", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected profile 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/summary", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected cookie admin summary 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/logout", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://example.com")
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected logout 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	cleared := rec.Result().Cookies()[0]
+	if cleared.Name != sessionCookieName || cleared.MaxAge >= 0 {
+		t.Fatalf("expected clearing cookie, got %+v", cleared)
+	}
+}
+
+func TestAuthLoginRejectsWrongPassword(t *testing.T) {
+	s, _ := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader([]byte(`{"username":"missing","password":"bad-password"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMutatingAPIsRequireJSONContentType(t *testing.T) {
+	s, _ := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/reload?admin_token=test-admin", bytes.NewReader([]byte(`{}`)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
