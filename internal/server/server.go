@@ -24,16 +24,22 @@ var webFS embed.FS
 
 // Server wires HTTP routes together.
 type Server struct {
-	cfg           *config.Config
-	store         *store.Store
-	prx           *proxy.Proxy
-	mux           *http.ServeMux
-	sessionSecret string
+	cfg                    *config.Config
+	store                  *store.Store
+	prx                    *proxy.Proxy
+	mux                    *http.ServeMux
+	ephemeralSessionSecret string
 }
 
 // New builds a configured Server.
 func New(cfg *config.Config, st *store.Store, prx *proxy.Proxy) *Server {
-	s := &Server{cfg: cfg, store: st, prx: prx, mux: http.NewServeMux(), sessionSecret: newEphemeralSessionSecret()}
+	s := &Server{
+		cfg:                    cfg,
+		store:                  st,
+		prx:                    prx,
+		mux:                    http.NewServeMux(),
+		ephemeralSessionSecret: newEphemeralSessionSecret(),
+	}
 	s.routes()
 	return s
 }

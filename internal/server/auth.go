@@ -368,10 +368,10 @@ func (s *Server) sessionSecret() (string, error) {
 	if secret != "" && secret != "change-me-admin" {
 		return secret, nil
 	}
-	if s.sessionSecret == "" {
+	if s.ephemeralSessionSecret == "" {
 		return "", fmt.Errorf("auth_jwt_secret is required")
 	}
-	return s.sessionSecret, nil
+	return s.ephemeralSessionSecret, nil
 }
 
 func newEphemeralSessionSecret() string {
