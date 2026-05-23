@@ -11,3 +11,7 @@
 coverage.out
 coverage.html
 .sisyphus/
+
+# Local viewing/debugging helpers and config
+local-debug.bat
+config.local.json
