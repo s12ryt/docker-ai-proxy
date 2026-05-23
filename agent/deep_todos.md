@@ -98,6 +98,17 @@
 - [x] `internal/server/server.go` 接上 `/v1/responses`，沿用 `requireAccessToken`。
 - [x] 新增 e2e 測試：`TestServeResponses_OpenAICompatibleUpstream`、`TestServeResponses_StreamPassThrough`、`TestServeResponses_NonOpenAIProviderRejected`。
 - [x] README / agent 文件補 OpenAI Responses API 支援說明；非 OpenAI-compatible provider 明確回 501。
+- [x] CI 驗證：`5cee816` 後 `ci.yml` 與 `docker-publish.yml` 全綠；Responses API 完成。
+
+### P1–P3 backlog 實作切片 · 2026-05-23
+- [x] **P1 token usage 計數**：新增 `internal/proxy/usage.go`，解析 OpenAI `usage.prompt_tokens/completion_tokens/total_tokens`、Anthropic `usage.input_tokens/output_tokens`、Gemini `usageMetadata.*TokenCount`，寫入 `store.CallRecord.TokensIn/TokensOut`。
+- [x] token usage 覆蓋三條路徑：OpenAI-compatible raw pass-through 非串流 response、跨協定非串流翻譯 response、SSE stream final usage chunk；新增/補強 e2e 斷言讓 store recent calls 驗證 token 欄位。
+- [x] **P1 graceful shutdown**：`Server.Shutdown` 從 placeholder 改為釋放 server-owned store；`cmd/ai-hub/main.go` 保留 SIGINT/SIGTERM → `http.Server.Shutdown(ctx)`，並改由 `srv.Shutdown(ctx)` 關閉 store。
+- [x] **P2 熱重載**：新增 admin-only `POST /api/reload`，呼叫既有 `config.Reload()`；非 POST 回 405。
+- [x] **P2 DB 連線健康監控**：`/api/runtime` 新增 `db_stats`，輸出 driver、open/in-use/idle connections、wait_count、wait_duration_ms 等 `database/sql` pool 指標。
+- [x] **P2 Bug 12**：`loggingResponseWriter` 補 `io.ReaderFrom`，避免 wrapper 關閉未來 `io.Copy` / sendfile fast path。
+- [x] **P3 Bug 18**：`main.go` 的 `-version` / `--version` 參數改為大小寫不敏感。
+- [x] 本機 portable Go 驗證：`gofmt` + `go test -count=1 ./...` + `go vet ./...` 全通過（Windows 無 CGO，`-race` 仍由 CI Linux runner 驗證）。
 
 ## 已完成 (第二輪 bug 排查 · 2026-05-22)
 
@@ -121,35 +132,34 @@
 
 ### P0 · 阻塞性
 
-- [ ] **Responses API CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
+- [ ] **P1–P3 backlog 實作切片 CI 通過**：push 後到 https://github.com/s12ryt/docker-ai-proxy/actions 確認 `ci.yml` 與 `docker-publish.yml` 全綠。
 
 ### P1 · 重要（功能不完整或正確性問題）
 
-- [ ] **token usage 計數**：proxy 從上游 response body 解析 `usage.{prompt,completion,total}_tokens` 寫入 `store.CallRecord`。
-    - 注意：streaming 模式下 OpenAI 通常只在最後一個 chunk 帶 usage（且需 client 設 `stream_options.include_usage:true`）。可在 non-stream 路徑先做。
-    - 成本：小–中。
+- [x] **token usage 計數**：proxy 從上游 response body / SSE final usage 解析 token usage，寫入 `store.CallRecord.TokensIn/TokensOut`。
+    - 已覆蓋 OpenAI-compatible raw pass-through、跨協定非串流翻譯、SSE stream delta usage 三條路徑。
+    - dashboard 既有 summary/recent token 欄位可直接吃到資料。
 
-- [ ] **graceful shutdown**：cmd/ai-hub/main.go 接 SIGINT/SIGTERM，呼叫 `http.Server.Shutdown(ctx)` 並 close store；server.Shutdown 從 placeholder 改為 inject `*http.Server`。
-    - 成本：小。
+- [x] **graceful shutdown**：cmd/ai-hub/main.go 已接 SIGINT/SIGTERM 呼叫 `http.Server.Shutdown(ctx)`；`server.Shutdown` 從 placeholder 改為釋放 server-owned store，main 不再重複 defer close。
 
 ### P2 · 增強
 
-- [ ] **熱重載**：監聽 SIGHUP 或 `POST /api/reload` 走 `config.Reload()`。目前 Reload 已寫好但沒呼叫。
+- [x] **熱重載**：新增 admin-only `POST /api/reload` 走既有 `config.Reload()`；非 POST 回 405。
 - [ ] **rate limit / per-token quota**：每個 access token 的 RPM/TPM 限制。
 - [ ] **provider 健康檢查**：失敗計數 + 暫時冷卻（circuit breaker），讓 KeyPicker 跳過壞 key。
-- [ ] **dashboard 顯示 token 統計**（依賴上面 token usage 計數）。
+- [x] **dashboard 顯示 token 統計**：token usage 寫入後，既有 dashboard summary / recent calls token 欄位可顯示真實資料。
 - [ ] **DB schema migration 工具**：現在三套 schema 是 dialect 字串硬編碼，加欄位要三邊改。可導入 `golang-migrate` 或 `pressly/goose` 統一管理版本。
 - [ ] **DB retention job**：背景定時 `DELETE FROM ai_calls WHERE created_at < NOW() - INTERVAL ?`（雲端 DB 必要）。sqlite 時代靠刪檔，現在切雲端後沒清理機制會無限長大。
-- [ ] **DB 連線健康監控**：把 `db.Stats()`（open/idle/wait_count）暴露到 `/api/runtime`，方便診斷雲端連線池異常。
+- [x] **DB 連線健康監控**：`/api/runtime` 暴露 `db_stats`（driver/open/in_use/idle/wait_count/wait_duration_ms），方便診斷雲端連線池異常。
 - [ ] **（觀察中）Bug 16 · `rebindPostgres` 註釋處理**：目前 query 全是手寫硬編無註釋，未來引入 query builder 時再補 `--` / `/* */` 略過邏輯。
-- [ ] **（觀察中）Bug 12 · loggingResponseWriter 實作 `io.ReaderFrom`**：當前 proxy 路徑不走 sendfile fast path 沒影響；若未來改用 `io.Copy(w, src)` 模式且需 zero-copy，需補。
+- [x] **Bug 12 · loggingResponseWriter 實作 `io.ReaderFrom`**：已補 `ReadFrom`，避免 wrapper 關閉未來 `io.Copy` / sendfile fast path。
 
 ### P3 · 體驗與品質
 
 - [ ] **本機開發**：建議補一份 `Makefile` 或 `scripts/dev.ps1`，方便沒 Go 環境用 Docker 跑測試（例如 `docker run --rm -v ${PWD}:/src -w /src golang:1.22 go test ./...`）。
-- [ ] **更多 e2e 測試**：覆蓋 SSE 流式、X-Forwarded-For、Anthropic 路徑、超時。
+- [x] **更多 e2e 測試**：補強 token usage、SSE stream usage、runtime db_stats、reload method/status 測試；先前多協定階段已覆蓋 SSE 流式與 Anthropic/Gemini 路徑。
 - [ ] **dashboard.js 切換 provider enable/disable** 的 UI（目前只能改 config.json + 重啟）。
 - [ ] **README 補英文版**（README.en.md）給國際用戶。
 - [ ] **OpenAPI / Swagger** 描述 `/v1/*` 與 `/api/*`。
 - [ ] **read replica / read-write 分流**：高流量場景需 `DB_READ_DSN` 之類設計（讀走 replica）。雲端 DB 才有意義，sqlite 用不到。
-- [ ] **（觀察中）Bug 18 · `main.go -version` flag 大小寫不敏感**：影響微小，需要時補 `strings.ToLower`。
+- [x] **Bug 18 · `main.go -version` flag 大小寫不敏感**：已補 `strings.ToLower`。

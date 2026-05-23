@@ -333,6 +333,9 @@ func TestServeChatCompletions_AnthropicTranslation(t *testing.T) {
 	if len(rows) != 1 || rows[0].Status != 200 || rows[0].Provider != "anthropic" {
 		t.Fatalf("bad log: %+v", rows)
 	}
+	if rows[0].TokensIn != 7 || rows[0].TokensOut != 3 {
+		t.Fatalf("expected logged tokens 7/3, got in=%d out=%d", rows[0].TokensIn, rows[0].TokensOut)
+	}
 }
 
 // TestServeChatCompletions_GeminiTranslation verifies the OpenAI-in →
@@ -438,6 +441,13 @@ func TestServeChatCompletions_GeminiTranslation(t *testing.T) {
 	if usage == nil || toIntForTest(usage["total_tokens"]) != 9 {
 		t.Fatalf("expected usage.total_tokens=9, got %v", resp["usage"])
 	}
+	rows, err := st.RecentCalls(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].TokensIn != 5 || rows[0].TokensOut != 4 {
+		t.Fatalf("expected logged tokens 5/4, got %+v", rows)
+	}
 }
 
 func TestServeChatCompletions_AnthropicStreamingTranslation(t *testing.T) {
@@ -515,6 +525,9 @@ func TestServeChatCompletions_AnthropicStreamingTranslation(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Status != 200 || rows[0].Provider != "anthropic" {
 		t.Fatalf("bad log: %+v", rows)
+	}
+	if rows[0].TokensIn != 0 || rows[0].TokensOut != 3 {
+		t.Fatalf("expected logged stream tokens 0/3, got in=%d out=%d", rows[0].TokensIn, rows[0].TokensOut)
 	}
 }
 
@@ -619,6 +632,9 @@ func TestServeAnthropicMessages_OpenAIUpstream(t *testing.T) {
 	if len(rows) != 1 || rows[0].Status != 200 || rows[0].Provider != "openai" || rows[0].Path != "/v1/messages" {
 		t.Fatalf("bad log: %+v", rows)
 	}
+	if rows[0].TokensIn != 6 || rows[0].TokensOut != 4 {
+		t.Fatalf("expected logged tokens 6/4, got in=%d out=%d", rows[0].TokensIn, rows[0].TokensOut)
+	}
 }
 
 func TestServeGeminiGenerateContent_OpenAIUpstream(t *testing.T) {
@@ -715,6 +731,13 @@ func TestServeGeminiGenerateContent_OpenAIUpstream(t *testing.T) {
 	if usage == nil || toIntForTest(usage["totalTokenCount"]) != 10 {
 		t.Fatalf("expected totalTokenCount=10, got %v", resp["usageMetadata"])
 	}
+	rows, err := st.RecentCalls(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].TokensIn != 6 || rows[0].TokensOut != 4 {
+		t.Fatalf("expected logged tokens 6/4, got %+v", rows)
+	}
 }
 
 func TestServeAnthropicMessages_OpenAIStreamingUpstream(t *testing.T) {
@@ -780,6 +803,13 @@ func TestServeAnthropicMessages_OpenAIStreamingUpstream(t *testing.T) {
 	if !strings.Contains(out, "event: content_block_delta") || !strings.Contains(out, "hello anthropic stream") || !strings.Contains(out, "event: message_stop") {
 		t.Fatalf("expected Anthropic stream events, got %s", out)
 	}
+	rows, err := st.RecentCalls(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].TokensIn != 3 || rows[0].TokensOut != 2 {
+		t.Fatalf("expected logged stream tokens 3/2, got %+v", rows)
+	}
 }
 
 func TestServeGeminiGenerateContent_OpenAIStreamingUpstream(t *testing.T) {
@@ -839,6 +869,13 @@ func TestServeGeminiGenerateContent_OpenAIStreamingUpstream(t *testing.T) {
 	out := rec.Body.String()
 	if !strings.Contains(out, "hello gemini stream") || !strings.Contains(out, "\"finishReason\":\"STOP\"") {
 		t.Fatalf("expected Gemini stream chunks, got %s", out)
+	}
+	rows, err := st.RecentCalls(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].TokensIn != 3 || rows[0].TokensOut != 2 {
+		t.Fatalf("expected logged stream tokens 3/2, got %+v", rows)
 	}
 }
 
@@ -1046,6 +1083,9 @@ func TestServeEmbeddings_OpenAICompatibleUpstream(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Status != 200 || rows[0].Provider != "openai" || rows[0].Path != "/v1/embeddings" {
 		t.Fatalf("bad log: %+v", rows)
+	}
+	if rows[0].TokensIn != 2 || rows[0].TokensOut != 0 {
+		t.Fatalf("expected logged tokens 2/0, got in=%d out=%d", rows[0].TokensIn, rows[0].TokensOut)
 	}
 }
 

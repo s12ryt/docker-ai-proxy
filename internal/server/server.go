@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -67,6 +68,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/providers", s.requireAdmin(http.HandlerFunc(s.handleProviders)))
 	s.mux.Handle("/api/recent", s.requireAdmin(http.HandlerFunc(s.handleRecent)))
 	s.mux.Handle("/api/runtime", s.requireAdmin(http.HandlerFunc(s.handleRuntime)))
+	s.mux.Handle("/api/reload", s.requireAdmin(http.HandlerFunc(s.handleReload)))
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
@@ -121,7 +123,7 @@ func (s *Server) handleRuntime(w http.ResponseWriter, _ *http.Request) {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	snap := s.cfg.Snapshot()
-	writeJSON(w, map[string]any{
+	out := map[string]any{
 		"go_version": runtime.Version(),
 		"goroutines": runtime.NumGoroutine(),
 		"heap_alloc": ms.HeapAlloc,
@@ -130,7 +132,29 @@ func (s *Server) handleRuntime(w http.ResponseWriter, _ *http.Request) {
 		"started_at": snap.StartedAt,
 		"uptime":     time.Since(snap.StartedAt).Round(time.Second).String(),
 		"providers":  len(snap.Providers),
-	})
+	}
+	if s.store != nil && s.store.DB() != nil {
+		stats := s.store.DB().Stats()
+		out["db_stats"] = map[string]any{
+			"driver":               s.store.Driver(),
+			"max_open_connections": stats.MaxOpenConnections,
+			"open_connections":     stats.OpenConnections,
+			"in_use":               stats.InUse,
+			"idle":                 stats.Idle,
+			"wait_count":           stats.WaitCount,
+			"wait_duration_ms":     stats.WaitDuration.Milliseconds(),
+		}
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	config.Reload()
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) requireAccessToken(next http.Handler) http.Handler {
@@ -205,6 +229,18 @@ func (l *loggingResponseWriter) Write(b []byte) (int, error) {
 	return l.ResponseWriter.Write(b)
 }
 
+// ReadFrom forwards io.ReaderFrom when available so wrappers do not disable
+// optimized io.Copy paths, while still marking the response as written.
+func (l *loggingResponseWriter) ReadFrom(r io.Reader) (int64, error) {
+	if !l.wroteHeader {
+		l.wroteHeader = true
+	}
+	if rf, ok := l.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(r)
+	}
+	return io.Copy(l.ResponseWriter, r)
+}
+
 // Flush forwards Flush() so the proxy's streaming path keeps working
 // when the inner ResponseWriter is wrapped by loggingResponseWriter.
 func (l *loggingResponseWriter) Flush() {
@@ -261,5 +297,10 @@ func extractBearer(r *http.Request) string {
 	return strings.TrimSpace(h)
 }
 
-// Shutdown is a placeholder for graceful shutdown logic.
-func (s *Server) Shutdown(_ context.Context) error { return nil }
+// Shutdown releases server-owned resources after the HTTP server stops.
+func (s *Server) Shutdown(_ context.Context) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	return s.store.Close()
+}

@@ -684,9 +684,19 @@ func (p *Proxy) serveStreamThrough(w http.ResponseWriter, resp *http.Response, p
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
 	var n int64
+	var usageBuf []byte
+	captureUsage := resp.StatusCode >= 200 && resp.StatusCode < 300 && !stream
 	for {
 		nr, er := resp.Body.Read(buf)
 		if nr > 0 {
+			if captureUsage {
+				if len(usageBuf)+nr <= maxRequestBytes {
+					usageBuf = append(usageBuf, buf[:nr]...)
+				} else {
+					captureUsage = false
+					usageBuf = nil
+				}
+			}
 			nw, ew := w.Write(buf[:nr])
 			n += int64(nw)
 			if flusher != nil {
@@ -709,6 +719,9 @@ func (p *Proxy) serveStreamThrough(w http.ResponseWriter, resp *http.Response, p
 			}
 			break
 		}
+	}
+	if captureUsage {
+		applyUsageFromJSON(rec, usageBuf)
 	}
 	rec.BytesOut = n
 }
@@ -751,12 +764,16 @@ func (p *Proxy) serveChatResponseAs(w http.ResponseWriter, resp *http.Response, 
 		return
 	}
 
+	applyUsageFromJSON(rec, upstreamBody)
 	translated, err := translateChatResponseTo(srcKind, dstKind, requestedModel, upstreamBody)
 	if err != nil {
 		rec.Status = http.StatusBadGateway
 		rec.ErrMessage = err.Error()
 		writeJSONError(w, http.StatusBadGateway, "translate response: "+err.Error())
 		return
+	}
+	if rec.TokensIn == 0 && rec.TokensOut == 0 {
+		applyUsageFromJSON(rec, translated)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -66,6 +66,9 @@ func (p *Proxy) serveChatStreamAs(w http.ResponseWriter, resp *http.Response, sr
 		if !ok {
 			return nil
 		}
+		if delta.HasUsage {
+			applyTokenUsage(rec, int64(delta.Usage.PromptTokens), int64(delta.Usage.CompletionTokens), int64(delta.Usage.TotalTokens))
+		}
 		n, err := em.emit(w, delta)
 		em.bytesOut += int64(n)
 		if flusher != nil && n > 0 {

@@ -567,4 +567,38 @@ Responses API 採 **OpenAI-compatible raw pass-through**：
 ### 驗證
 
 - 本機已跑 `gofmt`、`go test -count=1 ./...`、`go vet ./...`、`git diff --check`；`diff --check` 只有 Windows autocrlf warning。
-- commit/push 後仍需等 GitHub Actions `ci.yml` 與 `docker-publish.yml` 全綠。
+- commit `5cee816` push 後 GitHub Actions `ci.yml` 與 `docker-publish.yml` 全綠。
+
+---
+
+## 2026-05-23 · P1–P3 backlog 實作切片
+
+### 目標
+
+處理 `agent/deep_todos.md` 中可在目前架構內安全落地的 P1–P3 項目：token usage、graceful shutdown、熱重載、DB runtime stats、loggingResponseWriter `ReadFrom`、version flag 大小寫不敏感，並補測試。
+
+### 主要變更
+
+1. **token usage 計數**
+   - 新增 `internal/proxy/usage.go`，統一解析 OpenAI `usage.prompt_tokens/completion_tokens/total_tokens`、Anthropic `usage.input_tokens/output_tokens`、Gemini `usageMetadata.*TokenCount`。
+   - `serveStreamThrough` 在非串流 raw pass-through response 中累積小於 `maxRequestBytes` 的 body 後解析 usage。
+   - `serveChatResponseAs` 在跨協定非串流 response 翻譯前解析 upstream usage，必要時再從 translated body fallback。
+   - `serveChatStreamAs` 在 SSE 解析到 final usage chunk 時寫入 `CallRecord.TokensIn/TokensOut`。
+   - `proxy_test.go` 補多組 log token 斷言，覆蓋 Anthropic/Gemini 非串流、SSE、OpenAI-compatible embeddings 等路徑。
+
+2. **graceful shutdown**
+   - `server.Shutdown` 不再是 placeholder，會釋放 server-owned store。
+   - `cmd/ai-hub/main.go` 保留 SIGINT/SIGTERM → `http.Server.Shutdown(ctx)`，並改由 `srv.Shutdown(ctx)` 關閉 store，移除重複 `defer st.Close()`。
+
+3. **P2 runtime / reload / middleware**
+   - 新增 admin-only `POST /api/reload`，呼叫既有 `config.Reload()`；非 POST 回 405。
+   - `/api/runtime` 新增 `db_stats`：driver、max_open_connections、open_connections、in_use、idle、wait_count、wait_duration_ms。
+   - `loggingResponseWriter` 補 `io.ReaderFrom`，避免 wrapper 關閉未來 `io.Copy` / sendfile fast path。
+
+4. **P3 小品質項**
+   - `main.go -version` / `--version` 改為 `strings.ToLower` 後比對，大小寫不敏感。
+
+### 驗證
+
+- 本機 portable Go 已跑 `gofmt` 與 `go test -count=1 ./...` 全通過。
+- 後續 commit 前仍需跑 `go vet ./...`、`git diff --check`，並以 GitHub Actions Linux runner 驗證 race test。

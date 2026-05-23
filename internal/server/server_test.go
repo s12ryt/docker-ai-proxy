@@ -75,6 +75,53 @@ func TestAdminAuth_QueryParamFallback(t *testing.T) {
 	}
 }
 
+func TestRuntimeIncludesDBStats(t *testing.T) {
+	s, _ := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime?admin_token=test-admin", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	dbStats, ok := body["db_stats"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected db_stats map, got %v", body["db_stats"])
+	}
+	if dbStats["driver"] != "sqlite" {
+		t.Fatalf("expected sqlite driver, got %v", dbStats["driver"])
+	}
+	if _, ok := dbStats["open_connections"]; !ok {
+		t.Fatalf("expected open_connections in db_stats, got %v", dbStats)
+	}
+}
+
+func TestReload_MethodAndOK(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/reload?admin_token=test-admin", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/reload?admin_token=test-admin", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["ok"] != true {
+		t.Fatalf("expected ok=true, got %v", body)
+	}
+}
+
 func TestAccessToken_Required(t *testing.T) {
 	s, cfg := newTestServer(t)
 	cfg.AccessTokens = []string{"client-tok"}

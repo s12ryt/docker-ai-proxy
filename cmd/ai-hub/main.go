@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,9 +23,12 @@ var (
 )
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
-		log.Printf("ai-hub %s (%s)", version, commit)
-		return
+	if len(os.Args) > 1 {
+		arg := strings.ToLower(os.Args[1])
+		if arg == "-version" || arg == "--version" {
+			log.Printf("ai-hub %s (%s)", version, commit)
+			return
+		}
 	}
 	cfg := config.Get()
 
@@ -47,7 +51,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	defer st.Close()
 	log.Printf("ai-hub: store driver=%s", st.Driver())
 
 	prx := proxy.New(cfg, st)

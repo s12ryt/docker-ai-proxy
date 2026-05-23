@@ -246,7 +246,8 @@ print(resp.choices[0].message.content)
 | `GET /api/summary?hours=24` | 總請求/錯誤/延遲/Token 聚合 |
 | `GET /api/providers` | 供應商配置(不含 Keys) |
 | `GET /api/recent?limit=100` | 最近呼叫列表 |
-| `GET /api/runtime` | Go 運行時資訊 |
+| `GET /api/runtime` | Go 運行時資訊與 DB 連線池統計 |
+| `POST /api/reload` | 熱重載 `config.json`（需管理員權限） |
 | `GET /healthz` | 公開健康檢查 |
 
 ## 🏗️ 專案結構
