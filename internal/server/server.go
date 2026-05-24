@@ -35,8 +35,8 @@ type Server struct {
 	prx                    *proxy.Proxy
 	mux                    *http.ServeMux
 	ephemeralSessionSecret string
-	activeMu              sync.Mutex
-	activeClients         map[string]int
+	activeMu               sync.Mutex
+	activeClients          map[string]int
 }
 
 // New builds a configured Server.

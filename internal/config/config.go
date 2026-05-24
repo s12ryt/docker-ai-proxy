@@ -27,15 +27,15 @@ type Provider struct {
 
 // Client describes a downstream user allowed to call /v1/*.
 type Client struct {
-	Name          string   `json:"name"`
-	Token         string   `json:"token"`
+	Name            string   `json:"name"`
+	Token           string   `json:"token"`
 	Enabled         bool     `json:"enabled"`
 	DailyLimit      int      `json:"daily_limit"`
 	RPMLimit        int      `json:"rpm_limit"`
 	ConcurrentLimit int      `json:"concurrent_limit"`
 	AllowedModels   []string `json:"allowed_models"`
 	Note            string   `json:"note"`
-	CreatedAt     string   `json:"created_at"`
+	CreatedAt       string   `json:"created_at"`
 }
 
 // Config is the application configuration.
