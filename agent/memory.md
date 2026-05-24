@@ -59,3 +59,8 @@
     - `internal/store` 的 `calls` schema 新增 `client_name`，既有 DB 會在啟動時 best-effort `ALTER TABLE` 補欄位；proxy 會把通過授權的 Client 名稱寫入呼叫紀錄。
     - `internal/server/server.go` 在 `/v1/*` 授權後檢查每日限額（UTC 當日已記錄呼叫數）與模型白名單；超量回 `429`，模型不允許回 `403`，並保留 legacy `ACCESS_TOKENS` 相容。
     - `proxy.ServeModels` 會依 Client `allowed_models` 過濾 `/v1/models` 清單；README / README.en 已補充 Client policy enforcement 說明與測試案例。
+- 2026-05-24 Client concurrency hardening:
+    - 依使用者詢問多用戶並發承載後續實作，Client schema 新增 `rpm_limit` 與 `concurrent_limit`；`0` 表示不限制，負數會在正規化時拒絕。
+    - `internal/server/server.go` 以 `CountClientCallsSince` 強制最近一分鐘 `rpm_limit`，超量回 `429 client rpm limit exceeded`；同時以記憶體 active slot 限制每個 Client 的 in-flight request / SSE stream，超量回 `429 client concurrent limit exceeded`。
+    - `internal/store` 新增 `(client_name, ts)` 索引與既有 DB best-effort index migration，讓 daily/RPM 計數可走 client/time 查詢。
+    - Dashboard「Client 管理」新增每日、每分鐘與同時請求三種限制欄位；README、README.en、config.example 與 server tests 已同步更新。
