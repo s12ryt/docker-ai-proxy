@@ -39,100 +39,163 @@
   </section>
 
   <div id="app-shell" hidden>
-    <div class="dash-head">
-      <div>
-        <h1>運行儀表板</h1>
-        <p id="profile-line" class="lede" style="margin:6px 0 0;font-size:14px">—</p>
-      </div>
-      <div class="controls">
-        <select id="hours" class="input" style="min-width: 130px">
-          <option value="1">最近 1 小時</option>
-          <option value="6">最近 6 小時</option>
-          <option value="24" selected>最近 24 小時</option>
-          <option value="168">最近 7 天</option>
-        </select>
-        <button id="refresh" class="btn primary" style="padding:9px 18px">刷新</button>
+    <div class="dashboard-layout">
+      <aside class="dash-sidebar glass" aria-label="控制台分類">
+        <div class="sidebar-profile">
+          <span class="logo mini"></span>
+          <div>
+            <strong>控制台</strong>
+            <p id="profile-line">—</p>
+          </div>
+        </div>
+        <nav class="sidebar-nav">
+          <button class="side-link active" type="button" data-view="overview">總覽指標</button>
+          <button class="side-link" type="button" data-view="providers">供應商分佈</button>
+          <button class="side-link" type="button" data-view="runtime">運行資訊</button>
+          <button class="side-link" type="button" data-view="manage">供應商管理</button>
+          <button class="side-link" type="button" data-view="tokens">Client 管理</button>
+          <button class="side-link" type="button" data-view="recent">最近請求</button>
+        </nav>
+      </aside>
+
+      <div class="dash-content">
+        <div class="dash-head">
+          <div>
+            <h1 id="view-title">總覽指標</h1>
+            <p id="view-help" class="lede" style="margin:6px 0 0;font-size:14px">查看目前窗口內的核心流量、錯誤、延遲與 Token 使用量。</p>
+          </div>
+          <div class="controls">
+            <select id="hours" class="input" style="min-width: 130px">
+              <option value="1">最近 1 小時</option>
+              <option value="6">最近 6 小時</option>
+              <option value="24" selected>最近 24 小時</option>
+              <option value="168">最近 7 天</option>
+            </select>
+            <button id="refresh" class="btn primary" style="padding:9px 18px">刷新</button>
+          </div>
+        </div>
+
+        <section class="dash-view active" data-view-panel="overview">
+          <div class="kpis">
+            <div class="kpi glass">
+              <div class="lbl">總請求</div>
+              <div class="val" id="kpi-calls">—</div>
+              <div class="sub" id="kpi-window">—</div>
+              <canvas class="kpi-chart" id="chart-calls" height="74" aria-label="總請求趨勢"></canvas>
+            </div>
+            <div class="kpi glass">
+              <div class="lbl">錯誤數</div>
+              <div class="val" id="kpi-errors">—</div>
+              <div class="sub" id="kpi-rate">—</div>
+              <canvas class="kpi-chart" id="chart-errors" height="74" aria-label="錯誤數趨勢"></canvas>
+            </div>
+            <div class="kpi glass">
+              <div class="lbl">平均延遲</div>
+              <div class="val" id="kpi-latency">—</div>
+              <div class="sub">毫秒 (上游往返)</div>
+              <canvas class="kpi-chart" id="chart-latency" height="74" aria-label="平均延遲趨勢"></canvas>
+            </div>
+            <div class="kpi glass">
+              <div class="lbl">Token 進出</div>
+              <div class="val" id="kpi-tokens">—</div>
+              <div class="sub" id="kpi-tokens-sub">輸入 / 輸出</div>
+              <canvas class="kpi-chart" id="chart-tokens" height="74" aria-label="Token 進出趨勢"></canvas>
+            </div>
+          </div>
+        </section>
+
+        <section class="dash-view" data-view-panel="providers" hidden>
+          <section class="panel glass">
+            <h3>按供應商分佈</h3>
+            <div id="bar-list" class="bar-list">
+              <div class="empty">登入後刷新以加載。</div>
+            </div>
+          </section>
+        </section>
+
+        <section class="dash-view" data-view-panel="runtime" hidden>
+          <section class="panel glass">
+            <h3>運行資訊</h3>
+            <div id="runtime" class="bar-list">
+              <div class="empty">—</div>
+            </div>
+          </section>
+        </section>
+
+        <section class="dash-view" data-view-panel="manage" hidden>
+          <section class="panel glass provider-panel">
+            <div class="section-head">
+              <div>
+                <h3>AI 供應商管理</h3>
+                <p>可直接新增、編輯、停用或刪除供應商；按下「儲存變更」後會寫入目前的 CONFIG_PATH。</p>
+              </div>
+              <div class="provider-toolbar">
+                <button id="provider-add" class="btn ghost small" type="button">新增供應商</button>
+                <button id="provider-reload" class="btn ghost small" type="button">重新載入</button>
+                <button id="provider-save" class="btn primary small" type="button">儲存變更</button>
+              </div>
+            </div>
+            <div id="provider-status" class="status-line">登入後即可載入供應商。</div>
+            <div class="provider-table-wrap">
+              <table id="providers-table">
+                <thead>
+                  <tr>
+                    <th>啟用</th><th>Name</th><th>顯示名稱</th><th>Base URL</th>
+                    <th>Models（每行一個）</th><th>API Keys（每行一把）</th><th>權重</th><th>逾時</th><th>操作</th>
+                  </tr>
+                </thead>
+                <tbody><tr><td class="empty" colspan="9">尚未載入供應商</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="dash-view" data-view-panel="tokens" hidden>
+          <section class="panel glass token-panel">
+            <div class="section-head">
+              <div>
+                <h3>Client 管理</h3>
+                <p>替每個使用者建立獨立 Bearer Token，可啟用/停用、設定每日限制、允許模型與備註；沒有可用憑證時 /v1/* 會 401。</p>
+              </div>
+              <div class="provider-toolbar token-toolbar">
+                <button id="token-add" class="btn ghost small" type="button">新增 Client</button>
+                <button id="token-reload" class="btn ghost small" type="button">重新載入</button>
+                <button id="token-save" class="btn primary small" type="button">儲存變更</button>
+              </div>
+            </div>
+            <div id="token-status" class="status-line">登入後即可載入 Clients。</div>
+            <div class="provider-table-wrap token-table-wrap">
+              <table id="tokens-table">
+                <thead>
+                  <tr>
+                    <th>啟用</th><th>名稱</th><th>Token</th><th>每日限制</th>
+                    <th>允許模型（逗號或每行）</th><th>備註</th><th>建立時間</th><th>操作</th>
+                  </tr>
+                </thead>
+                <tbody><tr><td class="empty" colspan="8">尚未載入 Clients</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="dash-view" data-view-panel="recent" hidden>
+          <section class="panel glass">
+            <h3>最近請求</h3>
+            <div style="overflow:auto">
+              <table id="recent-table">
+                <thead>
+                  <tr>
+                    <th>時間</th><th>供應商</th><th>模型</th><th>狀態</th>
+                    <th>延遲</th><th>Tokens (in/out)</th><th>來源 IP</th>
+                  </tr>
+                </thead>
+                <tbody><tr><td class="empty" colspan="7">尚無資料</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
       </div>
     </div>
-
-    <div class="kpis">
-      <div class="kpi glass">
-        <div class="lbl">總請求</div>
-        <div class="val" id="kpi-calls">—</div>
-        <div class="sub" id="kpi-window">—</div>
-      </div>
-      <div class="kpi glass">
-        <div class="lbl">錯誤數</div>
-        <div class="val" id="kpi-errors">—</div>
-        <div class="sub" id="kpi-rate">—</div>
-      </div>
-      <div class="kpi glass">
-        <div class="lbl">平均延遲</div>
-        <div class="val" id="kpi-latency">—</div>
-        <div class="sub">毫秒 (上游往返)</div>
-      </div>
-      <div class="kpi glass">
-        <div class="lbl">Token 進出</div>
-        <div class="val" id="kpi-tokens">—</div>
-        <div class="sub" id="kpi-tokens-sub">輸入 / 輸出</div>
-      </div>
-    </div>
-
-    <div class="dash-grid">
-      <section class="panel glass">
-        <h3>按供應商分佈</h3>
-        <div id="bar-list" class="bar-list">
-          <div class="empty">登入後刷新以加載。</div>
-        </div>
-      </section>
-      <section class="panel glass">
-        <h3>運行資訊</h3>
-        <div id="runtime" class="bar-list">
-          <div class="empty">—</div>
-        </div>
-      </section>
-    </div>
-
-    <section class="panel glass provider-panel" style="margin-top:22px">
-      <div class="section-head">
-        <div>
-          <h3>AI 供應商管理</h3>
-          <p>可直接新增、編輯、停用或刪除供應商；按下「儲存變更」後會寫入目前的 CONFIG_PATH。</p>
-        </div>
-        <div class="provider-toolbar">
-          <button id="provider-add" class="btn ghost small" type="button">新增供應商</button>
-          <button id="provider-reload" class="btn ghost small" type="button">重新載入</button>
-          <button id="provider-save" class="btn primary small" type="button">儲存變更</button>
-        </div>
-      </div>
-      <div id="provider-status" class="status-line">登入後即可載入供應商。</div>
-      <div class="provider-table-wrap">
-        <table id="providers-table">
-          <thead>
-            <tr>
-              <th>啟用</th><th>Name</th><th>顯示名稱</th><th>Base URL</th>
-              <th>Models（每行一個）</th><th>API Keys（每行一把）</th><th>權重</th><th>逾時</th><th>操作</th>
-            </tr>
-          </thead>
-          <tbody><tr><td class="empty" colspan="9">尚未載入供應商</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel glass" style="margin-top:22px">
-      <h3>最近請求</h3>
-      <div style="overflow:auto">
-        <table id="recent-table">
-          <thead>
-            <tr>
-              <th>時間</th><th>供應商</th><th>模型</th><th>狀態</th>
-              <th>延遲</th><th>Tokens (in/out)</th><th>來源 IP</th>
-            </tr>
-          </thead>
-          <tbody><tr><td class="empty" colspan="7">尚無資料</td></tr></tbody>
-        </table>
-      </div>
-    </section>
   </div>
 </main>
 

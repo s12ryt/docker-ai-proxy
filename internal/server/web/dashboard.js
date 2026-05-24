@@ -18,9 +18,29 @@
   const providerSaveBtn = $("provider-save");
   const providerStatus = $("provider-status");
   const providerTableBody = document.querySelector("#providers-table tbody");
+  const tokenAddBtn = $("token-add");
+  const tokenReloadBtn = $("token-reload");
+  const tokenSaveBtn = $("token-save");
+  const tokenStatus = $("token-status");
+  const tokenTableBody = document.querySelector("#tokens-table tbody");
+  const viewTitle = $("view-title");
+  const viewHelp = $("view-help");
+  const sideLinks = Array.from(document.querySelectorAll(".side-link"));
+  const viewPanels = Array.from(document.querySelectorAll(".dash-view"));
+  const viewCopy = {
+    overview: ["總覽指標", "查看目前窗口內的核心流量、錯誤、延遲與 Token 使用量。"],
+    providers: ["供應商分佈", "比較各供應商在目前時間窗口內的請求量與平均延遲。"],
+    runtime: ["運行資訊", "查看 Go runtime、記憶體、啟動時間與供應商配置數量。"],
+    manage: ["供應商管理", "新增、編輯、停用或刪除 AI 供應商設定。"],
+    tokens: ["Client 管理", "替每個使用者建立獨立 Token、啟用狀態、每日限制與允許模型。"],
+    recent: ["最近請求", "檢視最近 API 呼叫、狀態碼、延遲與 Token 使用。"],
+  };
 
   let providersDirty = false;
+  let tokensDirty = false;
   let currentUser = null;
+  let lastSummarySeries = [];
+  let chartResizeTimer = null;
 
   signoutBtn.addEventListener("click", async (e) => {
     e.preventDefault();
@@ -90,7 +110,22 @@
     authPanel.hidden = true;
     appShell.hidden = false;
     signoutBtn.hidden = false;
-    profileLine.textContent = `已登入：${user.username}（${user.role}）`;
+    profileLine.textContent = `${user.username} · ${user.role}`;
+    showView("overview");
+  }
+
+  function showView(view) {
+    const activeView = viewCopy[view] ? view : "overview";
+    sideLinks.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === activeView));
+    viewPanels.forEach((panel) => {
+      const active = panel.dataset.viewPanel === activeView;
+      panel.hidden = !active;
+      panel.classList.toggle("active", active);
+    });
+    [viewTitle.textContent, viewHelp.textContent] = viewCopy[activeView];
+    if (activeView === "overview") {
+      requestAnimationFrame(() => drawKPICharts(lastSummarySeries));
+    }
   }
 
   function showAuthError(err) {
@@ -139,6 +174,91 @@
     return d.toLocaleString();
   }
 
+  function drawKPICharts(series) {
+    const points = Array.isArray(series) ? series : [];
+    const charts = [
+      ["chart-calls", points.map((p) => Number(p.calls || 0)), "#22d3ee"],
+      ["chart-errors", points.map((p) => Number(p.errors || 0)), "#fca5a5"],
+      ["chart-latency", points.map((p) => Number(p.avg_latency_ms || 0)), "#a78bfa"],
+      ["chart-tokens", points.map((p) => Number(p.tokens_in || 0) + Number(p.tokens_out || 0)), "#f472b6"],
+    ];
+    charts.forEach(([id, values, color]) => drawSparkline($(id), values, color));
+  }
+
+  function drawSparkline(canvas, values, color) {
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(1, Math.round(rect.width || canvas.clientWidth || 220));
+    const height = Math.max(1, Math.round(rect.height || 74));
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+
+    const padX = 4;
+    const padY = 10;
+    const usableW = Math.max(1, width - padX * 2);
+    const usableH = Math.max(1, height - padY * 2);
+    const data = values.length ? values : [0, 0];
+    const max = Math.max(...data, 0);
+    const min = Math.min(...data, 0);
+    const range = max - min || 1;
+
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.14)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 3; i++) {
+      const y = padY + (usableH / 2) * i;
+      ctx.beginPath();
+      ctx.moveTo(padX, y);
+      ctx.lineTo(width - padX, y);
+      ctx.stroke();
+    }
+
+    const coords = data.map((value, index) => {
+      const x = padX + (data.length === 1 ? usableW : (usableW * index) / (data.length - 1));
+      const y = padY + usableH - ((value - min) / range) * usableH;
+      return [x, y];
+    });
+
+    const gradient = ctx.createLinearGradient(0, padY, 0, height - padY);
+    gradient.addColorStop(0, color + "55");
+    gradient.addColorStop(1, color + "00");
+
+    ctx.beginPath();
+    coords.forEach(([x, y], index) => {
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.lineTo(coords[coords.length - 1][0], height - padY);
+    ctx.lineTo(coords[0][0], height - padY);
+    ctx.closePath();
+    ctx.fillStyle = gradient;
+    ctx.fill();
+
+    ctx.beginPath();
+    coords.forEach(([x, y], index) => {
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 8;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    const last = coords[coords.length - 1];
+    ctx.beginPath();
+    ctx.arc(last[0], last[1], 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+
   function renderSummary(s) {
     $("kpi-calls").textContent = fmt(s.total_calls);
     $("kpi-window").textContent = `${s.window_hours} 小時窗口`;
@@ -148,6 +268,8 @@
     $("kpi-latency").textContent = Math.round(s.avg_latency_ms);
     $("kpi-tokens").textContent = fmt((s.tokens_in || 0) + (s.tokens_out || 0));
     $("kpi-tokens-sub").textContent = `${fmt(s.tokens_in)} / ${fmt(s.tokens_out)}`;
+    lastSummarySeries = Array.isArray(s.series) ? s.series : [];
+    drawKPICharts(lastSummarySeries);
 
     const list = $("bar-list");
     list.innerHTML = "";
@@ -320,6 +442,107 @@
     renderProviders(providers);
   }
 
+  function renderTokens(data) {
+    tokensDirty = false;
+    const clients = Array.isArray(data) ? data : data.clients || [];
+    const envOverridden = Boolean(data && data.env_overridden);
+    const legacyCount = Number((data && data.legacy_token_count) || 0);
+    const warnings = [];
+    if (legacyCount > 0) warnings.push(`另有 ${legacyCount} 個 legacy ACCESS_TOKENS 仍可使用。`);
+    if (envOverridden) warnings.push("ACCESS_TOKENS 環境變數已設定，重新載入/重啟後可能覆蓋 legacy Token 設定。");
+    if (!clients.length) {
+      tokenTableBody.innerHTML = '<tr><td class="empty" colspan="8">目前沒有 Client。若也沒有 legacy ACCESS_TOKENS，/v1/* 會回 401。</td></tr>';
+      tokenStatus.textContent = `目前沒有 Client；可按「新增 Client」建立給外部使用者的 Token。${warnings.length ? " " + warnings.join(" ") : ""}`;
+      return;
+    }
+    tokenTableBody.innerHTML = clients.map(tokenRow).join("");
+    tokenStatus.textContent = `已載入 ${clients.length} 個 Client。Token 預設遮蔽，請勿截圖外流。${warnings.length ? " " + warnings.join(" ") : ""}`;
+  }
+
+  function tokenRow(client, index) {
+    const models = Array.isArray(client.allowed_models) ? client.allowed_models.join("\n") : "";
+    const createdAt = client.created_at || "";
+    const dailyLimit = Number(client.daily_limit || 0);
+    return `<tr data-index="${index}">
+      <td class="check-cell"><input data-field="enabled" type="checkbox" ${client.enabled ? "checked" : ""} /></td>
+      <td><input data-field="name" value="${escapeAttr(client.name || "")}" placeholder="alice" autocomplete="off" /></td>
+      <td><input data-field="token" class="secret-text" value="${escapeAttr(client.token || "")}" placeholder="client-token-..." autocomplete="off" spellcheck="false" /></td>
+      <td><input data-field="daily_limit" type="number" min="0" value="${dailyLimit}" /><div class="hint">0 = 不限制</div></td>
+      <td><textarea data-field="allowed_models" placeholder="gpt-4o-mini\ndeepseek-chat">${escapeHTML(models)}</textarea><div class="hint">空白 = 全部模型</div></td>
+      <td><textarea data-field="note" placeholder="用途、聯絡方式或備註">${escapeHTML(client.note || "")}</textarea></td>
+      <td><span class="muted-cell">${createdAt ? escapeHTML(new Date(createdAt).toLocaleString()) : "儲存時建立"}</span><input data-field="created_at" type="hidden" value="${escapeAttr(createdAt)}" /></td>
+      <td class="row-actions"><button class="btn danger small" data-action="delete-token" type="button">刪除</button></td>
+    </tr>`;
+  }
+
+  function collectTokens() {
+    return Array.from(tokenTableBody.querySelectorAll('tr[data-index]')).map((row) => {
+      const value = (field) => row.querySelector(`[data-field="${field}"]`);
+      return {
+        enabled: value("enabled").checked,
+        name: value("name").value.trim(),
+        token: value("token").value.trim(),
+        daily_limit: Math.max(0, Number(value("daily_limit").value) || 0),
+        allowed_models: lines(value("allowed_models").value),
+        note: value("note").value.trim(),
+        created_at: value("created_at").value.trim(),
+      };
+    });
+  }
+
+  function addToken() {
+    const clients = collectTokens();
+    clients.push({ enabled: true, name: "", token: "", daily_limit: 0, allowed_models: [], note: "", created_at: "" });
+    tokenTableBody.innerHTML = clients.map(tokenRow).join("");
+    markTokensDirty();
+    const lastName = tokenTableBody.querySelector("tr:last-child [data-field='name']");
+    if (lastName) lastName.focus();
+  }
+
+  function deleteToken(row) {
+    const name = row.querySelector('[data-field="name"]')?.value || "這個 Client";
+    if (!confirm(`確定刪除「${name}」？按「儲存變更」後才會寫入設定檔。`)) return;
+    row.remove();
+    markTokensDirty();
+    if (!tokenTableBody.querySelector("tr[data-index]")) {
+      tokenTableBody.innerHTML = '<tr><td class="empty" colspan="8">目前沒有 Client。儲存空清單後，若也沒有 legacy ACCESS_TOKENS，/v1/* 會拒絕請求。</td></tr>';
+    }
+  }
+
+  function markTokensDirty() {
+    tokensDirty = true;
+    tokenStatus.textContent = "有尚未儲存的 Client 變更。";
+  }
+
+  async function saveTokens() {
+    const clients = collectTokens();
+    if (!clients.length && !confirm("儲存空 Client 清單後，若沒有 legacy ACCESS_TOKENS，/v1/* 會全部 401。確定嗎？")) return;
+    tokenSaveBtn.disabled = true;
+    tokenSaveBtn.textContent = "儲存中…";
+    try {
+      const res = await fetchJSON("/api/clients", {
+        method: "PUT",
+        body: JSON.stringify({ clients }),
+      });
+      tokensDirty = false;
+      tokenStatus.textContent = `已儲存 ${res.count ?? clients.length} 個 Client 到 ${res.config_path || "目前設定檔"}。${res.legacy_token_count ? `另有 ${res.legacy_token_count} 個 legacy ACCESS_TOKENS 仍可使用。` : ""}${res.env_overridden ? " 注意：ACCESS_TOKENS 環境變數已設定，重新載入/重啟後可能覆蓋 legacy Token 設定。" : ""}`;
+      await loadTokens(true);
+    } catch (err) {
+      alert("儲存 Client 失敗: " + err.message);
+      tokenStatus.textContent = "儲存失敗，請檢查名稱/Token 是否空白、重複或包含空白字元。";
+    } finally {
+      tokenSaveBtn.disabled = false;
+      tokenSaveBtn.textContent = "儲存變更";
+    }
+  }
+
+  async function loadTokens(force = false) {
+    if (tokensDirty && !force) return;
+    if (tokensDirty && force && !confirm("目前有尚未儲存的 Client 變更，重新載入會覆蓋畫面上的修改。確定重新載入？")) return;
+    const data = await fetchJSON("/api/clients");
+    renderTokens(data);
+  }
+
   function escapeHTML(s) {
     return String(s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -351,7 +574,10 @@
       renderSummary(sum);
       renderRuntime(runtime);
       renderRecent(recent);
-      if (loadProviderConfig) await loadProviders(false);
+      if (loadProviderConfig) {
+        await loadProviders(false);
+        await loadTokens(false);
+      }
     } catch (err) {
       alert("載入失敗: " + err.message);
     } finally {
@@ -370,12 +596,30 @@
     const btn = e.target.closest('[data-action="delete"]');
     if (btn) deleteProvider(btn.closest("tr"));
   });
+  tokenTableBody.addEventListener("input", (e) => {
+    if (e.target.matches("input, textarea")) markTokensDirty();
+  });
+  tokenTableBody.addEventListener("change", (e) => {
+    if (e.target.matches("input, textarea")) markTokensDirty();
+  });
+  tokenTableBody.addEventListener("click", (e) => {
+    const btn = e.target.closest('[data-action="delete-token"]');
+    if (btn) deleteToken(btn.closest("tr"));
+  });
 
+  sideLinks.forEach((btn) => btn.addEventListener("click", () => showView(btn.dataset.view)));
   providerAddBtn.addEventListener("click", addProvider);
   providerSaveBtn.addEventListener("click", saveProviders);
   providerReloadBtn.addEventListener("click", () => loadProviders(true).catch((err) => alert("載入供應商失敗: " + err.message)));
+  tokenAddBtn.addEventListener("click", addToken);
+  tokenSaveBtn.addEventListener("click", saveTokens);
+  tokenReloadBtn.addEventListener("click", () => loadTokens(true).catch((err) => alert("載入 Clients 失敗: " + err.message)));
   refreshBtn.addEventListener("click", () => refresh(true));
   hoursSel.addEventListener("change", () => refresh(false));
+  window.addEventListener("resize", () => {
+    clearTimeout(chartResizeTimer);
+    chartResizeTimer = setTimeout(() => drawKPICharts(lastSummarySeries), 120);
+  });
 
   // Handle page transitions
   document.body.style.opacity = "1";
