@@ -469,7 +469,7 @@ td .pill {
 }
 .provider-table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); }
 #providers-table { min-width: 1180px; }
-#tokens-table { min-width: 1320px; }
+#tokens-table { min-width: 1580px; }
 #providers-table th, #providers-table td,
 #tokens-table th, #tokens-table td { vertical-align: top; }
 #providers-table input, #providers-table textarea,

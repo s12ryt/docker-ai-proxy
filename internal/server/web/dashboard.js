@@ -451,7 +451,7 @@
     if (legacyCount > 0) warnings.push(`另有 ${legacyCount} 個 legacy ACCESS_TOKENS 仍可使用。`);
     if (envOverridden) warnings.push("ACCESS_TOKENS 環境變數已設定，重新載入/重啟後可能覆蓋 legacy Token 設定。");
     if (!clients.length) {
-      tokenTableBody.innerHTML = '<tr><td class="empty" colspan="8">目前沒有 Client。若也沒有 legacy ACCESS_TOKENS，/v1/* 會回 401。</td></tr>';
+      tokenTableBody.innerHTML = '<tr><td class="empty" colspan="10">目前沒有 Client。若也沒有 legacy ACCESS_TOKENS，/v1/* 會回 401。</td></tr>';
       tokenStatus.textContent = `目前沒有 Client；可按「新增 Client」建立給外部使用者的 Token。${warnings.length ? " " + warnings.join(" ") : ""}`;
       return;
     }
@@ -463,11 +463,15 @@
     const models = Array.isArray(client.allowed_models) ? client.allowed_models.join("\n") : "";
     const createdAt = client.created_at || "";
     const dailyLimit = Number(client.daily_limit || 0);
+    const rpmLimit = Number(client.rpm_limit || 0);
+    const concurrentLimit = Number(client.concurrent_limit || 0);
     return `<tr data-index="${index}">
       <td class="check-cell"><input data-field="enabled" type="checkbox" ${client.enabled ? "checked" : ""} /></td>
       <td><input data-field="name" value="${escapeAttr(client.name || "")}" placeholder="alice" autocomplete="off" /></td>
       <td><input data-field="token" class="secret-text" value="${escapeAttr(client.token || "")}" placeholder="client-token-..." autocomplete="off" spellcheck="false" /></td>
       <td><input data-field="daily_limit" type="number" min="0" value="${dailyLimit}" /><div class="hint">0 = 不限制</div></td>
+      <td><input data-field="rpm_limit" type="number" min="0" value="${rpmLimit}" /><div class="hint">0 = 不限制</div></td>
+      <td><input data-field="concurrent_limit" type="number" min="0" value="${concurrentLimit}" /><div class="hint">0 = 不限制</div></td>
       <td><textarea data-field="allowed_models" placeholder="gpt-4o-mini\ndeepseek-chat">${escapeHTML(models)}</textarea><div class="hint">空白 = 全部模型</div></td>
       <td><textarea data-field="note" placeholder="用途、聯絡方式或備註">${escapeHTML(client.note || "")}</textarea></td>
       <td><span class="muted-cell">${createdAt ? escapeHTML(new Date(createdAt).toLocaleString()) : "儲存時建立"}</span><input data-field="created_at" type="hidden" value="${escapeAttr(createdAt)}" /></td>
@@ -483,6 +487,8 @@
         name: value("name").value.trim(),
         token: value("token").value.trim(),
         daily_limit: Math.max(0, Number(value("daily_limit").value) || 0),
+        rpm_limit: Math.max(0, Number(value("rpm_limit").value) || 0),
+        concurrent_limit: Math.max(0, Number(value("concurrent_limit").value) || 0),
         allowed_models: lines(value("allowed_models").value),
         note: value("note").value.trim(),
         created_at: value("created_at").value.trim(),
@@ -492,7 +498,7 @@
 
   function addToken() {
     const clients = collectTokens();
-    clients.push({ enabled: true, name: "", token: "", daily_limit: 0, allowed_models: [], note: "", created_at: "" });
+    clients.push({ enabled: true, name: "", token: "", daily_limit: 0, rpm_limit: 0, concurrent_limit: 0, allowed_models: [], note: "", created_at: "" });
     tokenTableBody.innerHTML = clients.map(tokenRow).join("");
     markTokensDirty();
     const lastName = tokenTableBody.querySelector("tr:last-child [data-field='name']");
@@ -505,7 +511,7 @@
     row.remove();
     markTokensDirty();
     if (!tokenTableBody.querySelector("tr[data-index]")) {
-      tokenTableBody.innerHTML = '<tr><td class="empty" colspan="8">目前沒有 Client。儲存空清單後，若也沒有 legacy ACCESS_TOKENS，/v1/* 會拒絕請求。</td></tr>';
+      tokenTableBody.innerHTML = '<tr><td class="empty" colspan="10">目前沒有 Client。儲存空清單後，若也沒有 legacy ACCESS_TOKENS，/v1/* 會拒絕請求。</td></tr>';
     }
   }
 

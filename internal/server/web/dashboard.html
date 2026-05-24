@@ -155,7 +155,7 @@
             <div class="section-head">
               <div>
                 <h3>Client 管理</h3>
-                <p>替每個使用者建立獨立 Bearer Token，可啟用/停用、設定每日限制、允許模型與備註；沒有可用憑證時 /v1/* 會 401。</p>
+                <p>替每個使用者建立獨立 Bearer Token，可啟用/停用、設定每日/每分鐘/同時請求限制、允許模型與備註；沒有可用憑證時 /v1/* 會 401。</p>
               </div>
               <div class="provider-toolbar token-toolbar">
                 <button id="token-add" class="btn ghost small" type="button">新增 Client</button>
@@ -168,11 +168,11 @@
               <table id="tokens-table">
                 <thead>
                   <tr>
-                    <th>啟用</th><th>名稱</th><th>Token</th><th>每日限制</th>
+                    <th>啟用</th><th>名稱</th><th>Token</th><th>每日限制</th><th>每分鐘限制</th><th>同時請求</th>
                     <th>允許模型（逗號或每行）</th><th>備註</th><th>建立時間</th><th>操作</th>
                   </tr>
                 </thead>
-                <tbody><tr><td class="empty" colspan="8">尚未載入 Clients</td></tr></tbody>
+                <tbody><tr><td class="empty" colspan="10">尚未載入 Clients</td></tr></tbody>
               </table>
             </div>
           </section>
