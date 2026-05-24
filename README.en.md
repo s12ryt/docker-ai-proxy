@@ -60,7 +60,7 @@ Configuration priority: **environment variables > config.json > defaults**.
 | --- | --- | --- |
 | `LISTEN` | `:8080` | Listen address |
 | `ADMIN_TOKEN` | `change-me-admin` | Admin token for dashboard and `/api/*` |
-| `ACCESS_TOKENS` | empty | Comma-separated client tokens; empty means `/v1/*` is open |
+| `ACCESS_TOKENS` | empty | Legacy comma-separated client tokens; prefer dashboard Client management for named/enabled/limited clients; `/v1/*` is rejected when no usable credential is configured |
 | `DB_DRIVER` | `sqlite` | `sqlite`, `mysql`, or `postgres` |
 | `DB_PATH` | `data/ai-hub.db` | SQLite path |
 | `DB_DSN` | empty | MySQL/PostgreSQL DSN |
@@ -75,7 +75,7 @@ See [`config.example.json`](./config.example.json) for a complete example with O
 
 ## API
 
-All `/v1/*` endpoints use bearer tokens from `ACCESS_TOKENS` when configured.
+All `/v1/*` endpoints require a bearer token from an enabled dashboard Client or legacy `ACCESS_TOKENS`. If no usable credential is configured, model proxy requests fail closed with `401 Unauthorized` instead of being exposed anonymously.
 
 ### Models
 
@@ -147,6 +147,10 @@ Admin endpoints require `ADMIN_TOKEN`.
 | --- | --- |
 | `GET /api/summary?hours=24` | Request/error/latency/token summary |
 | `GET /api/providers` | Provider config without API keys |
+| `GET /api/access-tokens` | List legacy `/v1/*` client Bearer tokens for the admin dashboard |
+| `PUT /api/access-tokens` | Create, edit, or delete legacy Access Tokens; an empty list makes `/v1/*` return 401 unless enabled Clients still exist |
+| `GET /api/clients` | List named Clients with enabled state, daily limits, notes, and allowed model allowlists |
+| `PUT /api/clients` | Create, edit, or delete Clients; disabled tokens are rejected, and `daily_limit` / `allowed_models` are enforced on `/v1/*` |
 | `GET /api/recent?limit=100` | Recent calls |
 | `GET /api/runtime` | Go runtime and DB connection pool stats |
 | `POST /api/reload` | Reload `config.json` |
@@ -163,6 +167,7 @@ Available tasks: `fmt`, `test`, `vet`, `check`, `all`. The script uses `go` from
 ## Security notes
 
 - Change `ADMIN_TOKEN` before production use.
+- Before exposing the service publicly, create at least one enabled dashboard Client or keep legacy `ACCESS_TOKENS`; with no usable credential, `/v1/*` returns `401` instead of allowing anonymous model proxy access. Client `daily_limit` is enforced per UTC day using logged calls, and `allowed_models` limits usable models plus filters `/v1/models`.
 - Put the service behind TLS in production.
 - Call logs contain metadata but not prompt content. Use `DB_RETENTION_DAYS` for automatic log cleanup, or keep it at `0` and manage retention manually.
 

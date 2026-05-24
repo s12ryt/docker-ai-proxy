@@ -2,6 +2,17 @@
   "listen": ":8080",
   "admin_token": "change-me-please",
   "access_tokens": ["client-token-1"],
+  "clients": [
+    {
+      "name": "demo-client",
+      "token": "client-token-1",
+      "enabled": true,
+      "daily_limit": 0,
+      "allowed_models": [],
+      "note": "Example downstream client; empty allowed_models means all models.",
+      "created_at": ""
+    }
+  ],
   "auth_jwt_secret": "change-me-long-random-session-secret",
   "auth_cookie_secure": false,
   "auth_session_ttl": "24h",

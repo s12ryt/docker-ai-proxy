@@ -473,6 +473,186 @@ paths:
           description: Origin or Referer rejected
         '415':
           description: JSON content type required
+  /api/access-tokens:
+    get:
+      summary: Access token configuration
+      security:
+        - adminSessionCookie: []
+        - adminBearerAuth: []
+        - adminQueryToken: []
+      responses:
+        '200':
+          description: Access token list and config metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      type: string
+                  count:
+                    type: integer
+                  config_path:
+                    type: string
+                  env_overridden:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      summary: Replace access token configuration
+      description: Requires application/json. An empty token list is allowed and makes /v1/* fail closed with 401. Cookie-authenticated browser requests must include same-origin Origin or Referer.
+      security:
+        - adminSessionCookie: []
+        - adminBearerAuth: []
+        - adminQueryToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tokens]
+              properties:
+                tokens:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Updated access token configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  count:
+                    type: integer
+                  config_path:
+                    type: string
+                  env_overridden:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Origin or Referer rejected
+        '415':
+          description: JSON content type required
+  /api/clients:
+    get:
+      summary: Client configuration
+      description: Lists named downstream Clients used for /v1/* bearer authentication and policy enforcement.
+      security:
+        - adminSessionCookie: []
+        - adminBearerAuth: []
+        - adminQueryToken: []
+      responses:
+        '200':
+          description: Client list and config metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  clients:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        token:
+                          type: string
+                        enabled:
+                          type: boolean
+                        daily_limit:
+                          type: integer
+                          description: UTC daily request limit. Zero means unlimited.
+                        allowed_models:
+                          type: array
+                          description: Empty means all models are allowed.
+                          items:
+                            type: string
+                        note:
+                          type: string
+                        created_at:
+                          type: string
+                  count:
+                    type: integer
+                  config_path:
+                    type: string
+                  env_overridden:
+                    type: boolean
+                  legacy_token_count:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      summary: Replace client configuration
+      description: Requires application/json. Disabled clients are rejected by /v1/*, daily_limit is enforced per UTC day, and allowed_models restricts usable models and filters /v1/models. Cookie-authenticated browser requests must include same-origin Origin or Referer.
+      security:
+        - adminSessionCookie: []
+        - adminBearerAuth: []
+        - adminQueryToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clients]
+              properties:
+                clients:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, token]
+                    properties:
+                      name:
+                        type: string
+                      token:
+                        type: string
+                      enabled:
+                        type: boolean
+                      daily_limit:
+                        type: integer
+                        description: UTC daily request limit. Zero means unlimited.
+                      allowed_models:
+                        type: array
+                        description: Empty means all models are allowed.
+                        items:
+                          type: string
+                      note:
+                        type: string
+                      created_at:
+                        type: string
+      responses:
+        '200':
+          description: Updated client configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  count:
+                    type: integer
+                  config_path:
+                    type: string
+                  env_overridden:
+                    type: boolean
+                  legacy_token_count:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Origin or Referer rejected
+        '415':
+          description: JSON content type required
   /api/recent:
     get:
       summary: Recent calls
@@ -546,7 +726,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      description: Client access token from ACCESS_TOKENS.
+      description: Required client access token from ACCESS_TOKENS for all model proxy endpoints. Requests fail closed with 401 when no client token is configured.
     adminBearerAuth:
       type: http
       scheme: bearer
