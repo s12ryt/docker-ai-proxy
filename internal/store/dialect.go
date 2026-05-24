@@ -46,6 +46,7 @@ func sqliteDialect() dialect {
     tokens_in INTEGER NOT NULL DEFAULT 0,
     tokens_out INTEGER NOT NULL DEFAULT 0,
     client_ip TEXT,
+    client_name TEXT,
     err TEXT
 );`,
 			`CREATE TABLE IF NOT EXISTS users (
@@ -90,6 +91,7 @@ func mysqlDialect() dialect {
     tokens_in BIGINT NOT NULL DEFAULT 0,
     tokens_out BIGINT NOT NULL DEFAULT 0,
     client_ip VARCHAR(64) NULL,
+    client_name VARCHAR(128) NULL,
     err TEXT NULL,
     PRIMARY KEY (id),
     KEY idx_calls_ts (ts),
@@ -135,6 +137,7 @@ func postgresDialect() dialect {
     tokens_in BIGINT NOT NULL DEFAULT 0,
     tokens_out BIGINT NOT NULL DEFAULT 0,
     client_ip TEXT,
+    client_name TEXT,
     err TEXT
 );`,
 			`CREATE TABLE IF NOT EXISTS users (

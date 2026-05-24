@@ -25,11 +25,23 @@ type Provider struct {
 	TimeoutSec  int      `json:"timeout_sec"`
 }
 
+// Client describes a downstream user allowed to call /v1/*.
+type Client struct {
+	Name          string   `json:"name"`
+	Token         string   `json:"token"`
+	Enabled       bool     `json:"enabled"`
+	DailyLimit    int      `json:"daily_limit"`
+	AllowedModels []string `json:"allowed_models"`
+	Note          string   `json:"note"`
+	CreatedAt     string   `json:"created_at"`
+}
+
 // Config is the application configuration.
 type Config struct {
 	Listen           string     `json:"listen"`
 	AdminToken       string     `json:"admin_token"`
 	AccessTokens     []string   `json:"access_tokens"`
+	Clients          []Client   `json:"clients"`
 	TelegramUserID   string     `json:"telegram_user_id"`
 	TelegramBotID    string     `json:"telegram_bot_id"`
 	DBPath           string     `json:"db_path"`
@@ -76,7 +88,8 @@ func Reload() {
 	defer current.mu.Unlock()
 	current.Listen = c.Listen
 	current.AdminToken = c.AdminToken
-	current.AccessTokens = c.AccessTokens
+	current.AccessTokens = append([]string(nil), c.AccessTokens...)
+	current.Clients = cloneClients(c.Clients)
 	current.TelegramUserID = c.TelegramUserID
 	current.TelegramBotID = c.TelegramBotID
 	current.DBPath = c.DBPath
@@ -105,6 +118,7 @@ func (c *Config) Snapshot() Config {
 	out := *c
 	out.mu = nil
 	out.AccessTokens = append([]string(nil), c.AccessTokens...)
+	out.Clients = cloneClients(c.Clients)
 	if len(c.Providers) > 0 {
 		out.Providers = make([]Provider, len(c.Providers))
 		for i, p := range c.Providers {
@@ -131,6 +145,85 @@ func (c *Config) ReplaceProviders(providers []Provider) error {
 	}
 	c.Providers = cloneProviders(providers)
 	return nil
+}
+
+// ReplaceAccessTokens swaps the client access token list in memory after validation and normalization.
+func (c *Config) ReplaceAccessTokens(tokens []string) error {
+	normalized, err := NormalizeAccessTokens(tokens)
+	if err != nil {
+		return err
+	}
+	if c.mu != nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+	}
+	c.AccessTokens = normalized
+	return nil
+}
+
+// ReplaceClients swaps the downstream client list in memory after validation and normalization.
+func (c *Config) ReplaceClients(clients []Client) error {
+	normalized, err := NormalizeClients(clients)
+	if err != nil {
+		return err
+	}
+	if c.mu != nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+	}
+	c.Clients = normalized
+	return nil
+}
+
+// FindClientByToken locates an enabled downstream client by bearer token.
+// Legacy ACCESS_TOKENS are accepted as synthetic clients for backwards compatibility.
+func (c *Config) FindClientByToken(token string) (Client, bool) {
+	if c.mu != nil {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+	}
+	return findClientByToken(c.Clients, c.AccessTokens, token)
+}
+
+// FindClientByName locates an enabled downstream client by display name.
+func (c *Config) FindClientByName(name string) (Client, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Client{}, false
+	}
+	if c.mu != nil {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+	}
+	for _, client := range c.Clients {
+		if client.Enabled && strings.EqualFold(client.Name, name) {
+			return client, true
+		}
+	}
+	return Client{}, false
+}
+
+// HasClientCredentials reports whether /v1/* has at least one configured credential.
+func (c *Config) HasClientCredentials() bool {
+	if c.mu != nil {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+	}
+	return hasClientCredentials(c.Clients, c.AccessTokens)
+}
+
+// ClientAllowsModel reports whether a downstream client may call the requested model.
+func ClientAllowsModel(client Client, model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" || len(client.AllowedModels) == 0 {
+		return true
+	}
+	for _, allowed := range client.AllowedModels {
+		if strings.EqualFold(strings.TrimSpace(allowed), model) {
+			return true
+		}
+	}
+	return false
 }
 
 // FindProvider locates a provider by name (case-insensitive).
@@ -199,14 +292,26 @@ func load() *Config {
 		if err := json.Unmarshal(data, &fileCfg); err != nil {
 			log.Printf("[config] parse %s failed: %v", path, err)
 		} else {
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				log.Printf("[config] inspect %s failed: %v", path, err)
+			}
 			if fileCfg.Listen != "" {
 				c.Listen = fileCfg.Listen
 			}
 			if fileCfg.AdminToken != "" {
 				c.AdminToken = fileCfg.AdminToken
 			}
-			if len(fileCfg.AccessTokens) > 0 {
+			if _, ok := raw["access_tokens"]; ok {
 				c.AccessTokens = fileCfg.AccessTokens
+			}
+			if _, ok := raw["clients"]; ok {
+				clients, err := NormalizeClients(fileCfg.Clients)
+				if err != nil {
+					log.Printf("[config] clients in %s invalid: %v", path, err)
+				} else {
+					c.Clients = clients
+				}
 			}
 			if fileCfg.TelegramUserID != "" {
 				c.TelegramUserID = fileCfg.TelegramUserID
@@ -319,6 +424,159 @@ func SaveProviders(providers []Provider) error {
 	return nil
 }
 
+// SaveAccessTokens replaces the client access token list in the active configuration file
+// and updates the in-memory config. Environment variable overrides still take
+// priority when the process reloads.
+func SaveAccessTokens(tokens []string) error {
+	normalized, err := NormalizeAccessTokens(tokens)
+	if err != nil {
+		return err
+	}
+
+	path := ConfigPath()
+	fileCfg := Config{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &fileCfg); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	fileCfg.AccessTokens = normalized
+
+	data, err := json.MarshalIndent(fileCfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	data = append(data, '\n')
+
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create config dir: %w", err)
+		}
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+
+	if current == nil {
+		current = load()
+		return nil
+	}
+	if current.mu == nil {
+		current.mu = new(sync.RWMutex)
+	}
+	current.mu.Lock()
+	current.AccessTokens = append([]string(nil), normalized...)
+	current.mu.Unlock()
+	return nil
+}
+
+// SaveClients replaces the downstream client list in the active configuration file
+// and updates the in-memory config. Legacy ACCESS_TOKENS remain available for
+// backwards compatibility unless explicitly edited through SaveAccessTokens.
+func SaveClients(clients []Client) error {
+	normalized, err := NormalizeClients(clients)
+	if err != nil {
+		return err
+	}
+
+	path := ConfigPath()
+	fileCfg := Config{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &fileCfg); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	fileCfg.Clients = normalized
+
+	data, err := json.MarshalIndent(fileCfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	data = append(data, '\n')
+
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create config dir: %w", err)
+		}
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+
+	if current == nil {
+		current = load()
+		return nil
+	}
+	if current.mu == nil {
+		current.mu = new(sync.RWMutex)
+	}
+	current.mu.Lock()
+	current.Clients = cloneClients(normalized)
+	current.mu.Unlock()
+	return nil
+}
+
+// NormalizeClients trims and validates downstream client records before persisting them.
+func NormalizeClients(clients []Client) ([]Client, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	out := make([]Client, 0, len(clients))
+	seenNames := map[string]struct{}{}
+	seenTokens := map[string]struct{}{}
+	for i, client := range clients {
+		client.Name = strings.TrimSpace(client.Name)
+		client.Token = strings.TrimSpace(client.Token)
+		client.Note = strings.TrimSpace(client.Note)
+		client.CreatedAt = strings.TrimSpace(client.CreatedAt)
+		client.AllowedModels = cleanStrings(client.AllowedModels)
+		if client.Name == "" {
+			return nil, fmt.Errorf("client #%d name is required", i+1)
+		}
+		if client.Token == "" {
+			return nil, fmt.Errorf("client %q token is required", client.Name)
+		}
+		if strings.ContainsAny(client.Token, " \t\r\n") {
+			return nil, fmt.Errorf("client %q token cannot contain whitespace", client.Name)
+		}
+		if client.DailyLimit < 0 {
+			return nil, fmt.Errorf("client %q daily_limit cannot be negative", client.Name)
+		}
+		nameKey := strings.ToLower(client.Name)
+		if _, ok := seenNames[nameKey]; ok {
+			return nil, fmt.Errorf("client %q is duplicated", client.Name)
+		}
+		seenNames[nameKey] = struct{}{}
+		if _, ok := seenTokens[client.Token]; ok {
+			return nil, fmt.Errorf("client %q token is duplicated", client.Name)
+		}
+		seenTokens[client.Token] = struct{}{}
+		if client.CreatedAt == "" {
+			client.CreatedAt = now
+		}
+		out = append(out, client)
+	}
+	return out, nil
+}
+
+// NormalizeAccessTokens trims blanks, removes empty entries, and rejects duplicates or whitespace.
+func NormalizeAccessTokens(tokens []string) ([]string, error) {
+	normalized := cleanStrings(tokens)
+	seen := map[string]struct{}{}
+	for i, token := range normalized {
+		if strings.ContainsAny(token, " \t\r\n") {
+			return nil, fmt.Errorf("access token #%d cannot contain whitespace", i+1)
+		}
+		if _, ok := seen[token]; ok {
+			return nil, fmt.Errorf("access token #%d is duplicated", i+1)
+		}
+		seen[token] = struct{}{}
+	}
+	return normalized, nil
+}
+
 // ValidateProviders checks the user-editable provider list before persisting it.
 func ValidateProviders(providers []Provider) error {
 	seen := map[string]struct{}{}
@@ -367,6 +625,41 @@ func cloneProviders(providers []Provider) []Provider {
 		out[i].Models = append([]string(nil), p.Models...)
 	}
 	return out
+}
+
+func cloneClients(clients []Client) []Client {
+	out := make([]Client, len(clients))
+	for i, client := range clients {
+		out[i] = client
+		out[i].AllowedModels = append([]string(nil), client.AllowedModels...)
+	}
+	return out
+}
+
+func findClientByToken(clients []Client, accessTokens []string, token string) (Client, bool) {
+	if token == "" {
+		return Client{}, false
+	}
+	for _, client := range clients {
+		if client.Enabled && client.Token == token {
+			return client, true
+		}
+	}
+	for _, legacyToken := range accessTokens {
+		if legacyToken == token {
+			return Client{Name: "legacy", Token: legacyToken, Enabled: true}, true
+		}
+	}
+	return Client{}, false
+}
+
+func hasClientCredentials(clients []Client, accessTokens []string) bool {
+	for _, client := range clients {
+		if client.Enabled && strings.TrimSpace(client.Token) != "" {
+			return true
+		}
+	}
+	return len(accessTokens) > 0
 }
 
 func cleanStrings(items []string) []string {

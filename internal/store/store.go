@@ -70,6 +70,7 @@ type CallRecord struct {
 	TokensIn   int64
 	TokensOut  int64
 	ClientIP   string
+	ClientName string
 	ErrMessage string
 }
 
@@ -143,7 +144,31 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate (%s): %w", s.dialect.name, err)
 		}
 	}
+	if err := s.ensureCallClientNameColumn(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) ensureCallClientNameColumn() error {
+	stmt := "ALTER TABLE calls ADD COLUMN client_name TEXT"
+	if s.dialect.name == "mysql" {
+		stmt = "ALTER TABLE calls ADD COLUMN client_name VARCHAR(128) NULL"
+	}
+	if _, err := s.db.Exec(stmt); err != nil {
+		if isDuplicateColumnError(err) {
+			return nil
+		}
+		return fmt.Errorf("migrate client_name (%s): %w", s.dialect.name, err)
+	}
+	return nil
+}
+
+func isDuplicateColumnError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate column") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "duplicate column name")
 }
 
 // LogCall persists a single call record. Safe for concurrent use; the
@@ -155,10 +180,10 @@ func (s *Store) LogCall(ctx context.Context, r CallRecord) error {
 		r.Timestamp = time.Now()
 	}
 	_, err := s.db.ExecContext(ctx,
-		s.dialect.rebind(`INSERT INTO calls(ts, provider, model, path, status, latency_ms, bytes_in, bytes_out, tokens_in, tokens_out, client_ip, err)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`),
+		s.dialect.rebind(`INSERT INTO calls(ts, provider, model, path, status, latency_ms, bytes_in, bytes_out, tokens_in, tokens_out, client_ip, client_name, err)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 		r.Timestamp.UnixMilli(), r.Provider, r.Model, r.Path, r.Status, r.LatencyMS,
-		r.BytesIn, r.BytesOut, r.TokensIn, r.TokensOut, r.ClientIP, r.ErrMessage,
+		r.BytesIn, r.BytesOut, r.TokensIn, r.TokensOut, r.ClientIP, r.ClientName, r.ErrMessage,
 	)
 	return err
 }
@@ -232,10 +257,21 @@ type Summary struct {
 	TokensOut    int64                   `json:"tokens_out"`
 	WindowHours  int                     `json:"window_hours"`
 	Providers    map[string]ProviderStat `json:"providers"`
+	Series       []SummaryPoint          `json:"series"`
 }
 
 // ProviderStat is the per-provider portion of Summary.
 type ProviderStat struct {
+	Calls        int64   `json:"calls"`
+	Errors       int64   `json:"errors"`
+	AvgLatencyMS float64 `json:"avg_latency_ms"`
+	TokensIn     int64   `json:"tokens_in"`
+	TokensOut    int64   `json:"tokens_out"`
+}
+
+// SummaryPoint is one time bucket used by dashboard trend charts.
+type SummaryPoint struct {
+	Ts           int64   `json:"ts"`
 	Calls        int64   `json:"calls"`
 	Errors       int64   `json:"errors"`
 	AvgLatencyMS float64 `json:"avg_latency_ms"`
@@ -248,7 +284,8 @@ func (s *Store) Summarize(ctx context.Context, hours int) (*Summary, error) {
 	if hours <= 0 {
 		hours = 24
 	}
-	since := time.Now().Add(-time.Duration(hours) * time.Hour).UnixMilli()
+	now := time.Now().UnixMilli()
+	since := now - int64(hours)*int64(time.Hour/time.Millisecond)
 
 	row := s.db.QueryRowContext(ctx,
 		s.dialect.rebind(`SELECT COUNT(1),
@@ -283,7 +320,88 @@ func (s *Store) Summarize(ctx context.Context, hours int) (*Summary, error) {
 		}
 		sum.Providers[name] = ps
 	}
-	return sum, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sum.Series, err = s.summarySeries(ctx, since, now, hours)
+	if err != nil {
+		return nil, err
+	}
+	return sum, nil
+}
+
+func (s *Store) summarySeries(ctx context.Context, since, now int64, hours int) ([]SummaryPoint, error) {
+	bucketCount := 24
+	if hours <= 6 {
+		bucketCount = 12
+	} else if hours >= 168 {
+		bucketCount = 28
+	}
+	if now <= since {
+		now = since + int64(time.Hour/time.Millisecond)
+	}
+	bucketMs := (now - since) / int64(bucketCount)
+	if bucketMs <= 0 {
+		bucketMs = 1
+	}
+
+	points := make([]SummaryPoint, bucketCount)
+	latencySums := make([]int64, bucketCount)
+	for i := range points {
+		points[i].Ts = since + int64(i)*bucketMs
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		s.dialect.rebind(`SELECT ts, status, latency_ms, tokens_in, tokens_out
+		   FROM calls WHERE ts >= ? ORDER BY ts`), since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ts, latencyMS, tokensIn, tokensOut int64
+		var status int
+		if err := rows.Scan(&ts, &status, &latencyMS, &tokensIn, &tokensOut); err != nil {
+			return nil, err
+		}
+		idx := int((ts - since) / bucketMs)
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= bucketCount {
+			idx = bucketCount - 1
+		}
+		points[idx].Calls++
+		if status >= 400 {
+			points[idx].Errors++
+		}
+		points[idx].TokensIn += tokensIn
+		points[idx].TokensOut += tokensOut
+		latencySums[idx] += latencyMS
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range points {
+		if points[i].Calls > 0 {
+			points[i].AvgLatencyMS = float64(latencySums[i]) / float64(points[i].Calls)
+		}
+	}
+	return points, nil
+}
+
+// CountClientCallsSince returns how many logged calls a client has made since the given time.
+func (s *Store) CountClientCallsSince(ctx context.Context, clientName string, since time.Time) (int64, error) {
+	clientName = strings.TrimSpace(clientName)
+	if s == nil || s.db == nil || clientName == "" {
+		return 0, nil
+	}
+	var count int64
+	err := s.db.QueryRowContext(ctx,
+		s.dialect.rebind(`SELECT COUNT(1) FROM calls WHERE client_name = ? AND ts >= ?`),
+		clientName, since.UnixMilli(),
+	).Scan(&count)
+	return count, err
 }
 
 // RecentCalls returns the most recent N call records (newest first).
@@ -292,7 +410,7 @@ func (s *Store) RecentCalls(ctx context.Context, limit int) ([]CallRecord, error
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		s.dialect.rebind(`SELECT id, ts, provider, model, path, status, latency_ms, bytes_in, bytes_out, tokens_in, tokens_out, COALESCE(client_ip,''), COALESCE(err,'')
+		s.dialect.rebind(`SELECT id, ts, provider, model, path, status, latency_ms, bytes_in, bytes_out, tokens_in, tokens_out, COALESCE(client_ip,''), COALESCE(client_name,''), COALESCE(err,'')
 		   FROM calls ORDER BY id DESC LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
@@ -303,7 +421,7 @@ func (s *Store) RecentCalls(ctx context.Context, limit int) ([]CallRecord, error
 		var r CallRecord
 		var tsMS int64
 		if err := rows.Scan(&r.ID, &tsMS, &r.Provider, &r.Model, &r.Path, &r.Status, &r.LatencyMS,
-			&r.BytesIn, &r.BytesOut, &r.TokensIn, &r.TokensOut, &r.ClientIP, &r.ErrMessage); err != nil {
+			&r.BytesIn, &r.BytesOut, &r.TokensIn, &r.TokensOut, &r.ClientIP, &r.ClientName, &r.ErrMessage); err != nil {
 			return nil, err
 		}
 		r.Timestamp = time.UnixMilli(tsMS)

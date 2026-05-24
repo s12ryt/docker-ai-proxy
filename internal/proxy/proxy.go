@@ -124,12 +124,13 @@ func (p *Proxy) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rec := store.CallRecord{
-		Timestamp: time.Now(),
-		Provider:  provider.Name,
-		Model:     upstreamModel,
-		Path:      r.URL.Path,
-		BytesIn:   int64(len(body)),
-		ClientIP:  clientIP(r),
+		Timestamp:  time.Now(),
+		Provider:   provider.Name,
+		Model:      upstreamModel,
+		Path:       r.URL.Path,
+		BytesIn:    int64(len(body)),
+		ClientIP:   clientIP(r),
+		ClientName: clientName(r),
 	}
 	start := time.Now()
 
@@ -429,12 +430,13 @@ func cleanPrefixedPath(path, prefix string) (string, bool) {
 
 func (p *Proxy) forwardOpenAICompatible(w http.ResponseWriter, r *http.Request, provider config.Provider, upstreamModel, upstreamPath string, outBody []byte, bytesIn int64, stream bool, contentType string, extraHeaders map[string]string) {
 	rec := store.CallRecord{
-		Timestamp: time.Now(),
-		Provider:  provider.Name,
-		Model:     upstreamModel,
-		Path:      r.URL.Path,
-		BytesIn:   bytesIn,
-		ClientIP:  clientIP(r),
+		Timestamp:  time.Now(),
+		Provider:   provider.Name,
+		Model:      upstreamModel,
+		Path:       r.URL.Path,
+		BytesIn:    bytesIn,
+		ClientIP:   clientIP(r),
+		ClientName: clientName(r),
 	}
 	start := time.Now()
 	defer func() {
@@ -561,12 +563,13 @@ func (p *Proxy) serveTranslatedChatRequest(w http.ResponseWriter, r *http.Reques
 	}
 
 	rec := store.CallRecord{
-		Timestamp: time.Now(),
-		Provider:  provider.Name,
-		Model:     upstreamModel,
-		Path:      r.URL.Path,
-		BytesIn:   int64(len(body)),
-		ClientIP:  clientIP(r),
+		Timestamp:  time.Now(),
+		Provider:   provider.Name,
+		Model:      upstreamModel,
+		Path:       r.URL.Path,
+		BytesIn:    int64(len(body)),
+		ClientIP:   clientIP(r),
+		ClientName: clientName(r),
 	}
 	start := time.Now()
 
@@ -796,11 +799,15 @@ func (p *Proxy) ServeModels(w http.ResponseWriter, r *http.Request) {
 	}{Object: "list"}
 
 	snap := p.cfg.Snapshot()
+	client, restrict := snap.FindClientByName(clientName(r))
 	for _, prov := range snap.Providers {
 		if !prov.Enabled {
 			continue
 		}
 		for _, m := range prov.Models {
+			if restrict && !config.ClientAllowsModel(client, m) {
+				continue
+			}
 			out.Data = append(out.Data, entry{ID: m, Object: "model", OwnedBy: prov.Name})
 		}
 	}
@@ -866,6 +873,10 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 //
 // IPv6 addresses inside any of the above are normalised by stripping a
 // trailing `:port` and surrounding brackets where present.
+func clientName(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-AI-Hub-Client"))
+}
+
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		for _, part := range strings.Split(xff, ",") {

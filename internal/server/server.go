@@ -1,13 +1,18 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
 	"io"
 	"io/fs"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/url"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -79,6 +84,8 @@ func (s *Server) routes() {
 
 	s.mux.Handle("/api/summary", s.requireAdmin(http.HandlerFunc(s.handleSummary)))
 	s.mux.Handle("/api/providers", s.requireAdmin(s.requireSameOriginForMutating(http.HandlerFunc(s.handleProviders))))
+	s.mux.Handle("/api/access-tokens", s.requireAdmin(s.requireSameOriginForMutating(http.HandlerFunc(s.handleAccessTokens))))
+	s.mux.Handle("/api/clients", s.requireAdmin(s.requireSameOriginForMutating(http.HandlerFunc(s.handleClients))))
 	s.mux.Handle("/api/recent", s.requireAdmin(http.HandlerFunc(s.handleRecent)))
 	s.mux.Handle("/api/runtime", s.requireAdmin(http.HandlerFunc(s.handleRuntime)))
 	s.mux.Handle("/api/reload", s.requireAdmin(s.requireSameOriginForMutating(http.HandlerFunc(s.handleReload))))
@@ -144,6 +151,99 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleAccessTokens(w http.ResponseWriter, r *http.Request) {
+	envOverridden := os.Getenv("ACCESS_TOKENS") != ""
+	switch r.Method {
+	case http.MethodGet:
+		snap := s.cfg.Snapshot()
+		writeJSON(w, map[string]any{
+			"tokens":         snap.AccessTokens,
+			"count":          len(snap.AccessTokens),
+			"config_path":    config.ConfigPath(),
+			"env_overridden": envOverridden,
+		})
+	case http.MethodPut:
+		var req struct {
+			Tokens []string `json:"tokens"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := config.SaveAccessTokens(req.Tokens); err != nil {
+			if isConfigFileError(err) {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.cfg.ReplaceAccessTokens(req.Tokens); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		snap := s.cfg.Snapshot()
+		writeJSON(w, map[string]any{
+			"ok":             true,
+			"count":          len(snap.AccessTokens),
+			"config_path":    config.ConfigPath(),
+			"env_overridden": envOverridden,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
+	envOverridden := os.Getenv("ACCESS_TOKENS") != ""
+	switch r.Method {
+	case http.MethodGet:
+		snap := s.cfg.Snapshot()
+		writeJSON(w, map[string]any{
+			"clients":            snap.Clients,
+			"count":              len(snap.Clients),
+			"config_path":        config.ConfigPath(),
+			"env_overridden":     envOverridden,
+			"legacy_token_count": len(snap.AccessTokens),
+		})
+	case http.MethodPut:
+		var req struct {
+			Clients []config.Client `json:"clients"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := config.SaveClients(req.Clients); err != nil {
+			if isConfigFileError(err) {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.cfg.ReplaceClients(req.Clients); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		snap := s.cfg.Snapshot()
+		writeJSON(w, map[string]any{
+			"ok":                 true,
+			"count":              len(snap.Clients),
+			"config_path":        config.ConfigPath(),
+			"env_overridden":     envOverridden,
+			"legacy_token_count": len(snap.AccessTokens),
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func isConfigFileError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "read ") || strings.Contains(msg, "write ") || strings.Contains(msg, "parse ") || strings.Contains(msg, "marshal ") || strings.Contains(msg, "create config dir")
+}
+
 func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 	limit := 100
 	if l := r.URL.Query().Get("limit"); l != "" {
@@ -200,19 +300,124 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) requireAccessToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		snap := s.cfg.Snapshot()
-		if len(snap.AccessTokens) == 0 {
-			next.ServeHTTP(w, r)
+		if !snap.HasClientCredentials() {
+			http.Error(w, "access token is not configured", http.StatusUnauthorized)
 			return
 		}
 		token := extractBearer(r)
-		for _, t := range snap.AccessTokens {
-			if t == token {
-				next.ServeHTTP(w, r)
-				return
-			}
+		client, ok := snap.FindClientByToken(token)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if !s.enforceClientPolicy(w, r, client) {
+			return
+		}
+		r.Header.Set("X-AI-Hub-Client", client.Name)
+		next.ServeHTTP(w, r)
 	})
+}
+
+const maxClientPolicyBodyBytes = 32 << 20
+
+func (s *Server) enforceClientPolicy(w http.ResponseWriter, r *http.Request, client config.Client) bool {
+	if client.DailyLimit > 0 {
+		if s.store == nil {
+			http.Error(w, "usage store unavailable", http.StatusServiceUnavailable)
+			return false
+		}
+		now := time.Now().UTC()
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		used, err := s.store.CountClientCallsSince(r.Context(), client.Name, start)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return false
+		}
+		if used >= int64(client.DailyLimit) {
+			http.Error(w, "client daily limit exceeded", http.StatusTooManyRequests)
+			return false
+		}
+	}
+
+	if len(client.AllowedModels) > 0 {
+		model, err := requestedModelForPolicy(r)
+		if err != nil {
+			http.Error(w, "inspect model: "+err.Error(), http.StatusBadRequest)
+			return false
+		}
+		if model != "" && !config.ClientAllowsModel(client, model) {
+			http.Error(w, "model not allowed for client", http.StatusForbidden)
+			return false
+		}
+	}
+	return true
+}
+
+func requestedModelForPolicy(r *http.Request) (string, error) {
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+		return "", nil
+	}
+	if model := geminiModelFromPolicyPath(r.URL.Path); model != "" {
+		return model, nil
+	}
+	if r.Body == nil {
+		return "", nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxClientPolicyBodyBytes))
+	if err != nil {
+		return "", err
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if len(body) == 0 {
+		return "", nil
+	}
+
+	mediaType, params, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if strings.HasPrefix(mediaType, "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return "", nil
+		}
+		form, err := multipart.NewReader(bytes.NewReader(body), boundary).ReadForm(maxClientPolicyBodyBytes)
+		if err != nil {
+			return "", err
+		}
+		defer form.RemoveAll()
+		if vals := form.Value["model"]; len(vals) > 0 {
+			return strings.TrimSpace(vals[0]), nil
+		}
+		return "", nil
+	}
+
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", nil
+	}
+	return strings.TrimSpace(payload.Model), nil
+}
+
+func geminiModelFromPolicyPath(path string) string {
+	if !strings.HasPrefix(path, "/v1beta/models/") {
+		return ""
+	}
+	model := strings.TrimPrefix(path, "/v1beta/models/")
+	for _, suffix := range []string{":generateContent", ":streamGenerateContent"} {
+		if strings.HasSuffix(model, suffix) {
+			model = strings.TrimSuffix(model, suffix)
+			break
+		}
+	}
+	if model == "" {
+		return ""
+	}
+	if decoded, err := url.PathUnescape(model); err == nil {
+		model = decoded
+	}
+	return strings.TrimSpace(model)
 }
 
 func (s *Server) withLogging(next http.Handler) http.Handler {
