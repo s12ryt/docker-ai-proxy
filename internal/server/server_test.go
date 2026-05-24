@@ -258,7 +258,7 @@ func TestClientsPutPersistsAndUpdatesRuntimeConfig(t *testing.T) {
 	t.Setenv("CONFIG_PATH", configPath)
 
 	s, cfg := newTestServer(t)
-	payload := []byte(`{"clients":[{"name":" Alice ","token":" alice-token ","enabled":true,"daily_limit":100,"allowed_models":[" m ",""],"note":" test "}]}`)
+	payload := []byte(`{"clients":[{"name":" Alice ","token":" alice-token ","enabled":true,"daily_limit":100,"rpm_limit":20,"concurrent_limit":3,"allowed_models":[" m ",""],"note":" test "}]}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/clients?admin_token=test-admin", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -272,7 +272,7 @@ func TestClientsPutPersistsAndUpdatesRuntimeConfig(t *testing.T) {
 		t.Fatalf("expected one client in runtime config, got %+v", snap.Clients)
 	}
 	client := snap.Clients[0]
-	if client.Name != "Alice" || client.Token != "alice-token" || !client.Enabled || client.DailyLimit != 100 || client.Note != "test" {
+	if client.Name != "Alice" || client.Token != "alice-token" || !client.Enabled || client.DailyLimit != 100 || client.RPMLimit != 20 || client.ConcurrentLimit != 3 || client.Note != "test" {
 		t.Fatalf("client was not normalized in runtime config: %+v", client)
 	}
 	if len(client.AllowedModels) != 1 || client.AllowedModels[0] != "m" || client.CreatedAt == "" {
@@ -287,7 +287,7 @@ func TestClientsPutPersistsAndUpdatesRuntimeConfig(t *testing.T) {
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if len(saved.Clients) != 1 || saved.Clients[0].Name != "Alice" || saved.Clients[0].Token != "alice-token" {
+	if len(saved.Clients) != 1 || saved.Clients[0].Name != "Alice" || saved.Clients[0].Token != "alice-token" || saved.Clients[0].RPMLimit != 20 || saved.Clients[0].ConcurrentLimit != 3 {
 		t.Fatalf("client was not persisted: %s", string(data))
 	}
 
@@ -394,6 +394,61 @@ func TestClientToken_DailyLimitExceeded(t *testing.T) {
 func TestClientToken_DailyLimitAllowsBelowLimit(t *testing.T) {
 	s, cfg := newTestServer(t)
 	cfg.Clients = []config.Client{{Name: "alice", Token: "client-token", Enabled: true, DailyLimit: 1}}
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer client-token")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestClientToken_RPMLimitExceeded(t *testing.T) {
+	s, cfg := newTestServer(t)
+	cfg.Clients = []config.Client{{Name: "alice", Token: "client-token", Enabled: true, RPMLimit: 1}}
+	if err := s.store.LogCall(context.Background(), store.CallRecord{ClientName: "alice", Status: http.StatusOK}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer client-token")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "rpm limit") {
+		t.Fatalf("expected rpm limit error, got body=%s", rec.Body.String())
+	}
+}
+
+func TestClientToken_ConcurrentLimitExceeded(t *testing.T) {
+	s, cfg := newTestServer(t)
+	cfg.Clients = []config.Client{{Name: "alice", Token: "client-token", Enabled: true, ConcurrentLimit: 1}}
+	release, ok := s.tryAcquireClient(config.Client{Name: "alice", ConcurrentLimit: 1})
+	if !ok {
+		t.Fatal("expected initial concurrent slot")
+	}
+	defer release()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer client-token")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "concurrent limit") {
+		t.Fatalf("expected concurrent limit error, got body=%s", rec.Body.String())
+	}
+}
+
+func TestClientToken_ConcurrentLimitAllowsAfterRelease(t *testing.T) {
+	s, cfg := newTestServer(t)
+	cfg.Clients = []config.Client{{Name: "alice", Token: "client-token", Enabled: true, ConcurrentLimit: 1}}
+	release, ok := s.tryAcquireClient(config.Client{Name: "alice", ConcurrentLimit: 1})
+	if !ok {
+		t.Fatal("expected initial concurrent slot")
+	}
+	release()
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer client-token")
 	rec := httptest.NewRecorder()

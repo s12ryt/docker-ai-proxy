@@ -17,6 +17,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/s12ryt/docker-ai-proxy/internal/config"
@@ -34,6 +35,8 @@ type Server struct {
 	prx                    *proxy.Proxy
 	mux                    *http.ServeMux
 	ephemeralSessionSecret string
+	activeMu              sync.Mutex
+	activeClients         map[string]int
 }
 
 // New builds a configured Server.
@@ -44,6 +47,7 @@ func New(cfg *config.Config, st *store.Store, prx *proxy.Proxy) *Server {
 		prx:                    prx,
 		mux:                    http.NewServeMux(),
 		ephemeralSessionSecret: newEphemeralSessionSecret(),
+		activeClients:          make(map[string]int),
 	}
 	s.routes()
 	return s
@@ -313,12 +317,43 @@ func (s *Server) requireAccessToken(next http.Handler) http.Handler {
 		if !s.enforceClientPolicy(w, r, client) {
 			return
 		}
+		release, ok := s.tryAcquireClient(client)
+		if !ok {
+			http.Error(w, "client concurrent limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		defer release()
 		r.Header.Set("X-AI-Hub-Client", client.Name)
 		next.ServeHTTP(w, r)
 	})
 }
 
 const maxClientPolicyBodyBytes = 32 << 20
+
+func (s *Server) tryAcquireClient(client config.Client) (func(), bool) {
+	name := strings.TrimSpace(client.Name)
+	if client.ConcurrentLimit <= 0 || name == "" {
+		return func() {}, true
+	}
+
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if s.activeClients == nil {
+		s.activeClients = make(map[string]int)
+	}
+	if s.activeClients[name] >= client.ConcurrentLimit {
+		return nil, false
+	}
+	s.activeClients[name]++
+	return func() {
+		s.activeMu.Lock()
+		defer s.activeMu.Unlock()
+		s.activeClients[name]--
+		if s.activeClients[name] <= 0 {
+			delete(s.activeClients, name)
+		}
+	}, true
+}
 
 func (s *Server) enforceClientPolicy(w http.ResponseWriter, r *http.Request, client config.Client) bool {
 	if client.DailyLimit > 0 {
@@ -335,6 +370,22 @@ func (s *Server) enforceClientPolicy(w http.ResponseWriter, r *http.Request, cli
 		}
 		if used >= int64(client.DailyLimit) {
 			http.Error(w, "client daily limit exceeded", http.StatusTooManyRequests)
+			return false
+		}
+	}
+
+	if client.RPMLimit > 0 {
+		if s.store == nil {
+			http.Error(w, "usage store unavailable", http.StatusServiceUnavailable)
+			return false
+		}
+		used, err := s.store.CountClientCallsSince(r.Context(), client.Name, time.Now().UTC().Add(-time.Minute))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return false
+		}
+		if used >= int64(client.RPMLimit) {
+			http.Error(w, "client rpm limit exceeded", http.StatusTooManyRequests)
 			return false
 		}
 	}

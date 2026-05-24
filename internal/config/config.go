@@ -29,10 +29,12 @@ type Provider struct {
 type Client struct {
 	Name          string   `json:"name"`
 	Token         string   `json:"token"`
-	Enabled       bool     `json:"enabled"`
-	DailyLimit    int      `json:"daily_limit"`
-	AllowedModels []string `json:"allowed_models"`
-	Note          string   `json:"note"`
+	Enabled         bool     `json:"enabled"`
+	DailyLimit      int      `json:"daily_limit"`
+	RPMLimit        int      `json:"rpm_limit"`
+	ConcurrentLimit int      `json:"concurrent_limit"`
+	AllowedModels   []string `json:"allowed_models"`
+	Note            string   `json:"note"`
 	CreatedAt     string   `json:"created_at"`
 }
 
@@ -543,6 +545,12 @@ func NormalizeClients(clients []Client) ([]Client, error) {
 		}
 		if client.DailyLimit < 0 {
 			return nil, fmt.Errorf("client %q daily_limit cannot be negative", client.Name)
+		}
+		if client.RPMLimit < 0 {
+			return nil, fmt.Errorf("client %q rpm_limit cannot be negative", client.Name)
+		}
+		if client.ConcurrentLimit < 0 {
+			return nil, fmt.Errorf("client %q concurrent_limit cannot be negative", client.Name)
 		}
 		nameKey := strings.ToLower(client.Name)
 		if _, ok := seenNames[nameKey]; ok {
