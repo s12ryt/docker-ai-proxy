@@ -22,3 +22,40 @@
 - 驗證限制:
     - PowerShell `where.exe go` 找不到 Go；`lsp_diagnostics` 因 `gopls` 未安裝失敗。
     - 尚未能執行 `gofmt` / `go test ./...` / `go vet`；後續有 Go 工具鏈時需優先執行。
+- 2026-05-24 前端動畫更新:
+    - 依使用者要求「幫我把html中添加動畫」，採取最小改動，只修改 `internal/server/web/style.css`，未改 HTML/JS。
+    - 新增頁面進場 `floatIn`、漸層流動 `gradientFlow`、Logo 光暈 `glowPulse`、hero code 浮動 `codeFloat`、code caret 閃爍 `caretBlink`，並套用到 landing 與 dashboard 主要區塊。
+    - 強化按鈕掃光 shimmer、主按鈕/標題漸層動畫、dashboard bar fill 動態漸層；新增 `prefers-reduced-motion: reduce` 降低動畫。
+- 2026-05-24 Dashboard 側邊欄重構:
+    - 依使用者要求「側邊欄點擊顯示各項指標」，將 `internal/server/web/dashboard.html` 的登入後內容改為 `.dashboard-layout`：左側 `.dash-sidebar` 分類、右側 `.dash-content` 顯示單一 `.dash-view`。
+    - 新增側邊欄分頁：總覽指標、供應商分佈、運行資訊、供應商管理、最近請求；保留原有 DOM id，讓 `renderSummary`、`renderRuntime`、`renderRecent`、`renderProviders` 可沿用原資料更新邏輯。
+    - `internal/server/web/dashboard.js` 新增 `showView()`、`viewCopy` 與 `.side-link` click 綁定；登入後預設顯示總覽，API 載入與 30 秒刷新流程維持不變。
+    - `internal/server/web/style.css` 新增側邊欄/分頁樣式、active/hover 效果與 1024px、640px 響應式處理，小螢幕下側邊欄改為水平捲動分類列。
+- 2026-05-24 API access token hardening:
+    - 依使用者指出「發布到公網沒有 api-key 很危險」，將 `/v1/*` 模型代理 API 改為 fail-closed：`ACCESS_TOKENS` 未設定時直接回 `401 Unauthorized`，不再匿名開放。
+    - `internal/server/server.go` 的 `requireAccessToken` 現在會先檢查 client token 是否已配置；已配置時仍維持 Bearer token 白名單比對。
+    - `internal/server/server_test.go` 新增未設定 token 時必須拒絕的測試，並保留已設定 token 的 401/200 行為測試。
+    - README、README.en.md、openapi.yaml 已同步說明公網部署前必須設定 `ACCESS_TOKENS`。
+- 2026-05-24 Dashboard Access Token 管理:
+    - 依使用者要求「在儀表板可視化配置 access token 的建立/刪除/編輯」，新增管理端 `/api/access-tokens`，使用既有 admin Cookie / legacy ADMIN_TOKEN 與同源 CSRF 防護。
+    - `internal/config/config.go` 新增 Access Token 正規化、重複/空白驗證、儲存到 `config.json` 與 runtime 替換；明確支援 `"access_tokens": []` 讓清空清單可在 reload 後維持 fail-closed。
+    - `internal/server/web/dashboard.html`/`dashboard.js` 新增側邊欄 Access Tokens 分頁，可新增、編輯、刪除、重新載入與儲存 Token；輸入欄位預設遮蔽，並提示空清單時 `/v1/*` 會 401、不會匿名開放。
+    - 文件新增 `/api/access-tokens` 管理端點與安全提醒；若 `ACCESS_TOKENS` 環境變數存在，儀表板會顯示 reload/restart 可能被 env 覆蓋的警告。
+- 2026-05-24 Dashboard KPI 折線圖:
+    - 依使用者要求將「總覽指標」四個 KPI 加上折線趨勢圖，後端 `/api/summary` 額外回傳 `series` 時間桶資料。
+    - `internal/store/store.go` 以 Go 端 bucket 聚合 calls/errors/avg latency/tokens，避免 SQLite/MySQL/PostgreSQL 方言差異。
+    - `dashboard.html` 新增四個 canvas；`dashboard.js` 使用原生 Canvas 繪製 sparkline，切換回總覽與視窗 resize 時會重繪。
+- 2026-05-24 Landing 供應商區塊移除:
+    - 依使用者要求刪除首頁「已支援的供應商」區塊，移除 `internal/server/web/index.html` 中 `#providers` section 與導覽列供應商錨點。
+    - 未改動供應商管理或後端 provider 功能；僅影響首頁展示內容。
+- 2026-05-24 Client 管理:
+    - 依使用者同意「開放給其他人用」的中期方案，將單純 Access Token 管理升級為 Client 管理：每個 Client 可保存名稱、Token、啟用狀態、每日限制、允許模型、備註與建立時間。
+    - `internal/config/config.go` 新增 Client schema、正規化/驗證、儲存到 `config.json`、runtime 替換與 snapshot 深拷貝；保留 legacy `ACCESS_TOKENS` 相容。
+    - `internal/server/server.go` 新增管理端 `/api/clients`，並讓 `/v1/*` 授權接受啟用中的 Client Token 或 legacy Access Token；停用的 Client Token 會回 401，沒有任何可用憑證時維持 fail-closed。
+    - `dashboard.html`/`dashboard.js` 將 Access Tokens 分頁改為「Client 管理」，可視化新增、編輯、刪除、啟用/停用 Client；Token 欄位仍遮蔽，並顯示 env/legacy token 警告。
+    - 目前 `daily_limit` 與 `allowed_models` 已持久化供後續策略使用，但尚未在請求路徑強制執行；下一步可接續做限額與模型白名單 enforcement。
+- 2026-05-24 Client policy enforcement:
+    - 依使用者要求「繼續實作」公網開放方案，接續將 Client 的 `daily_limit` 與 `allowed_models` 從純設定升級為請求路徑強制策略。
+    - `internal/store` 的 `calls` schema 新增 `client_name`，既有 DB 會在啟動時 best-effort `ALTER TABLE` 補欄位；proxy 會把通過授權的 Client 名稱寫入呼叫紀錄。
+    - `internal/server/server.go` 在 `/v1/*` 授權後檢查每日限額（UTC 當日已記錄呼叫數）與模型白名單；超量回 `429`，模型不允許回 `403`，並保留 legacy `ACCESS_TOKENS` 相容。
+    - `proxy.ServeModels` 會依 Client `allowed_models` 過濾 `/v1/models` 清單；README / README.en 已補充 Client policy enforcement 說明與測試案例。
