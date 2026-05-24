@@ -149,8 +149,8 @@ Admin endpoints require `ADMIN_TOKEN`.
 | `GET /api/providers` | Provider config without API keys |
 | `GET /api/access-tokens` | List legacy `/v1/*` client Bearer tokens for the admin dashboard |
 | `PUT /api/access-tokens` | Create, edit, or delete legacy Access Tokens; an empty list makes `/v1/*` return 401 unless enabled Clients still exist |
-| `GET /api/clients` | List named Clients with enabled state, daily limits, notes, and allowed model allowlists |
-| `PUT /api/clients` | Create, edit, or delete Clients; disabled tokens are rejected, and `daily_limit` / `allowed_models` are enforced on `/v1/*` |
+| `GET /api/clients` | List named Clients with enabled state, daily/RPM/concurrent limits, notes, and allowed model allowlists |
+| `PUT /api/clients` | Create, edit, or delete Clients; disabled tokens are rejected, and `daily_limit` / `rpm_limit` / `concurrent_limit` / `allowed_models` are enforced on `/v1/*` |
 | `GET /api/recent?limit=100` | Recent calls |
 | `GET /api/runtime` | Go runtime and DB connection pool stats |
 | `POST /api/reload` | Reload `config.json` |
@@ -167,7 +167,7 @@ Available tasks: `fmt`, `test`, `vet`, `check`, `all`. The script uses `go` from
 ## Security notes
 
 - Change `ADMIN_TOKEN` before production use.
-- Before exposing the service publicly, create at least one enabled dashboard Client or keep legacy `ACCESS_TOKENS`; with no usable credential, `/v1/*` returns `401` instead of allowing anonymous model proxy access. Client `daily_limit` is enforced per UTC day using logged calls, and `allowed_models` limits usable models plus filters `/v1/models`.
+- Before exposing the service publicly, create at least one enabled dashboard Client or keep legacy `ACCESS_TOKENS`; with no usable credential, `/v1/*` returns `401` instead of allowing anonymous model proxy access. Client `daily_limit` is enforced per UTC day using logged calls, `rpm_limit` is enforced over the most recent minute, `concurrent_limit` caps in-flight requests/SSE streams, and `allowed_models` limits usable models plus filters `/v1/models`.
 - Put the service behind TLS in production.
 - Call logs contain metadata but not prompt content. Use `DB_RETENTION_DAYS` for automatic log cleanup, or keep it at `0` and manage retention manually.
 

@@ -8,8 +8,10 @@
       "token": "client-token-1",
       "enabled": true,
       "daily_limit": 0,
+      "rpm_limit": 0,
+      "concurrent_limit": 0,
       "allowed_models": [],
-      "note": "Example downstream client; empty allowed_models means all models.",
+      "note": "Example downstream client; 0 limits mean unlimited, empty allowed_models means all models.",
       "created_at": ""
     }
   ],
