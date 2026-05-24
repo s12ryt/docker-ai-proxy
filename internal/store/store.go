@@ -147,6 +147,9 @@ func (s *Store) migrate() error {
 	if err := s.ensureCallClientNameColumn(); err != nil {
 		return err
 	}
+	if err := s.ensureCallClientTSIndex(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -164,11 +167,32 @@ func (s *Store) ensureCallClientNameColumn() error {
 	return nil
 }
 
+func (s *Store) ensureCallClientTSIndex() error {
+	stmt := "CREATE INDEX IF NOT EXISTS idx_calls_client_ts ON calls(client_name, ts)"
+	if s.dialect.name == "mysql" {
+		stmt = "ALTER TABLE calls ADD INDEX idx_calls_client_ts (client_name, ts)"
+	}
+	if _, err := s.db.Exec(stmt); err != nil {
+		if isDuplicateIndexError(err) {
+			return nil
+		}
+		return fmt.Errorf("migrate client index (%s): %w", s.dialect.name, err)
+	}
+	return nil
+}
+
 func isDuplicateColumnError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "duplicate column") ||
 		strings.Contains(msg, "already exists") ||
 		strings.Contains(msg, "duplicate column name")
+}
+
+func isDuplicateIndexError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate key name") ||
+		strings.Contains(msg, "duplicate index") ||
+		strings.Contains(msg, "already exists")
 }
 
 // LogCall persists a single call record. Safe for concurrent use; the

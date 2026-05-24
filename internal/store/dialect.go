@@ -61,6 +61,7 @@ func sqliteDialect() dialect {
 );`,
 			`CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);`,
 			`CREATE INDEX IF NOT EXISTS idx_calls_provider_ts ON calls(provider, ts);`,
+			`CREATE INDEX IF NOT EXISTS idx_calls_client_ts ON calls(client_name, ts);`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);`,
 		},
 		rebind: func(q string) string { return q },
@@ -95,7 +96,8 @@ func mysqlDialect() dialect {
     err TEXT NULL,
     PRIMARY KEY (id),
     KEY idx_calls_ts (ts),
-    KEY idx_calls_provider_ts (provider, ts)
+    KEY idx_calls_provider_ts (provider, ts),
+    KEY idx_calls_client_ts (client_name, ts)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 			`CREATE TABLE IF NOT EXISTS users (
     id BIGINT NOT NULL AUTO_INCREMENT,
@@ -152,6 +154,7 @@ func postgresDialect() dialect {
 );`,
 			`CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);`,
 			`CREATE INDEX IF NOT EXISTS idx_calls_provider_ts ON calls(provider, ts);`,
+			`CREATE INDEX IF NOT EXISTS idx_calls_client_ts ON calls(client_name, ts);`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);`,
 		},
 		rebind: rebindPostgres,
